@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//f/Robotic fle 2022/SEYED/New Start/Simulator/**)",
+      "Bash(find . -name \"README*\" -o -name \"*.md\" -o -name \".gitignore\")"
+    ]
+  }
+}
