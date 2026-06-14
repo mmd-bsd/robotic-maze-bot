@@ -22,10 +22,13 @@ junctions). The mission, in order:
 4. **Return to the start** point.
 5. **Drive the fastest path** from start to target.
 
-The fastest path must *eventually* account for the robot's **acceleration /
-variable speed** (speed is not constant). That timing model is **future work**
-for the real-robot "final version"; the current simulator uses shortest
-**distance** as the fastest-path metric (see `ALGORITHMS.md` → "Future work").
+The fastest path accounts for the robot's **acceleration / variable speed**
+(speed is not constant): the robot drives the **first search at a constant,
+cautious speed**, then on the **fast run** it accelerates on clear straights and
+**comes to a stop (v = 0) at every turn**. The fastest route therefore minimises
+**time**, not distance — a longer-but-straighter route can beat a shorter twisty
+one. See `ALGORITHMS.md` → §6. The exploration **early-stop proof is time-based
+too** (same `v_max`), so it never prunes a straight branch that could be faster.
 
 The project has **two parts**:
 
@@ -113,10 +116,24 @@ code between them.
 - **Loads** a maze JSON (auto-loads `sample_maze.json` on startup if present).
 - Animates the **full mission** with phases: `EXPLORE → FAST_RUN → DONE`
   (return-to-start is part of EXPLORE).
-- Controls: **Load**, **Play/Pause**, **Step**, **Reset**, **Speed** slider
-  (higher = faster), **Fit View**, plus zoom/pan.
+- Controls: **Load**, **Play/Pause**, **Step**, **Reset**, an **Optimized
+  search** toggle, a **Playback** multiplier (`0.25x … 8x`, where **1x = true
+  real time**), **Max speed** + **Max accel** sliders (the robot motion model),
+  **Fit View**, plus zoom/pan.
+- **Units are real-world:** 1 world unit = **1 cm** (grid spacing 20 → 20 cm).
+  Defaults: max speed **100 cm/s**, max accel **50 cm/s²**, cautious explore
+  speed **40 cm/s**. Speeds/distances in the status card are cm/s and cm.
+- **Optimized search** ON lets the robot stop early once the fastest route is
+  proven (§2); OFF disables the proof so it always maps the **full maze**.
+- The robot **glides** smoothly between nodes: constant speed while exploring,
+  and the trapezoidal accelerate/cruise/decelerate profile on the fast run.
 - **Status card:** Phase, Steps, At node, Last cmd, Target found, Travelled
-  distance, and **Proof** (the early-stop flag).
+  distance, **Proof** (the early-stop flag), current **Speed**, and **Path
+  time** (the fastest route's drive time).
+- **Speedometer:** a car-cluster-style half-dial (needle + green→red band +
+  digital cm/s) tracks the robot's live speed; it rescales to the **Max speed**
+  setting. During search the speed is the constant explore speed; during the
+  fast run it follows the acceleration profile.
 - **Command log:** every move as `F/L/R/B` with the from→to node and heading —
   these are the commands the real robot will execute.
 - Implementation is **pure standard library** for the graph algorithms (BFS /
@@ -129,7 +146,9 @@ code between them.
 | Grey thin line | Unexplored maze edge (not yet driven) |
 | Blue thick line | Visited / explored edge |
 | Yellow dashed stub | Unexplored branch seen from a visited node (frontier) |
-| Green thick line | Fastest path (during/after FAST RUN) |
+| Bold dark-green line | The **fastest** (minimum-time) route |
+| Lighter/thinner green lines | **Slower** alternative routes (lighter = slower) |
+| Red→green gradient on the fast path | Robot **speed** as it drives (red = fast, green = slow/at turns) |
 | Green circle | Start |
 | Black circle + red ring | Target (the black area) |
 | Red circle + arrow | Robot (arrow = heading) |
@@ -172,10 +191,12 @@ These are hard-won; keep them in mind before changing the simulator.
 5. **The fastest path is computed on the DISCOVERED map only** — never on the
    full maze — so early-stopping stays honest (the robot must not "use" edges it
    never drove).
-6. **Early-stop pruning is admissible:** a frontier `f` is only worth visiting
-   if `dist(start→f) + straight_line(f→target) < best_known_path`. The straight
-   line is a valid lower bound for an axis-aligned maze, so pruning never
-   discards a path that could actually be shorter. See `ALGORITHMS.md`.
+6. **Early-stop pruning is admissible and TIME-based:** a frontier `f` is only
+   worth visiting if `(dist(start→f) + straight_line(f→target)) / v_max <
+   best_known_TIME`. Dividing the distance lower bound by `v_max` is a valid
+   lower bound on time, so pruning never discards a route that could actually be
+   *faster* — including a clear straight that beats a twisty known path. The
+   bound MUST use the same `v_max` as the fast run. See `ALGORITHMS.md` §2.
 7. Flags: `proven_optimal` = stopped early **with branches still unexplored**;
    `fully_explored` = genuinely explored everything. They are mutually
    exclusive.
@@ -201,8 +222,11 @@ These are hard-won; keep them in mind before changing the simulator.
     (inner Canvas + Scrollbar + mouse-wheel) so it works on small screens.
     Keep panel content in fixed heights (e.g. command log) so the scroll region
     is correct.
-15. **Speed slider:** higher value = faster (smaller delay). Don't expose raw
-    milliseconds as "bigger = slower".
+15. **Playback is a real-time multiplier** (`0.25x … 8x`, snapped), not a raw
+    delay: at `1x` the animation runs in **true real time** (the frame interval
+    is fixed at `FRAME_MS`; each frame advances sim-time by
+    `FRAME_MS/1000 · playback`). This is separate from the robot's physical
+    **Max speed / Max accel** (cm, cm/s, cm/s²) — never conflate the two.
 
 ### Project / workflow
 16. Prefer **self-contained files** (the project values single-file scripts) and
@@ -233,8 +257,12 @@ These are hard-won; keep them in mind before changing the simulator.
 
 ## 7. Roadmap / open items
 
-- **Acceleration-aware fastest path** (variable speed, turn slowdowns) for the
-  real robot — see `ALGORITHMS.md` → "Future work".
+- **Acceleration-aware fastest path** (variable speed, stop at turns) — **done**
+  in the simulator (`time_optimal_path`, `FastRunPlan`), and the exploration
+  early-stop **proof is time-based** too (admissible with `v_max`), so a faster
+  straight branch is never falsely pruned; see `ALGORITHMS.md` §2/§6.
+  Open: calibrate `v_max` / `a_max` / per-turn caps from real encoder/IMU data
+  (turns are currently modelled as a full stop).
 - **Real-robot firmware** in the final version (port the command stream +
   exploration/proof logic to STM32; earlier C work lives in
   `New Start/Simulator/py-code/maze solving/maze_gbf/` and `New Start/code/`).

@@ -4,7 +4,8 @@
 > detail, every algorithm used by `simulator/maze solver/maze_solver.py`: how the
 > robot explores, how it proves it has the fastest route, how it returns home,
 > how the fastest path is computed, and how robot commands (`F/L/R/B`) are
-> generated. It ends with the planned acceleration-aware timing model.
+> generated. It ends with the acceleration-aware timing model that drives the
+> (minimum-time) fast run.
 
 ---
 
@@ -93,7 +94,13 @@ version fixes:
 ## 2. The "fastest route proven" early-stop (branch & bound)
 
 This is the key optimisation. It lets the robot stop **before** fully mapping the
-maze, the moment it can *prove* no undiscovered path could be shorter.
+maze, the moment it can *prove* no undiscovered path could be faster.
+
+> **The bound is by TIME, not distance.** Because the fast run accelerates and
+> stops at turns (§6), a longer-but-*straighter* undiscovered path (fewer stops)
+> can be faster than a shorter twisty known one. A distance bound would wrongly
+> prune such a path and raise `PROVEN ✓` too early — exactly the bug this section
+> now avoids. The bound must therefore use the *same metric the fast run does*.
 
 ### 2.1 When it may run
 
@@ -102,31 +109,35 @@ Before that the robot does not know the target location and may not use it.
 
 ### 2.2 The bound
 
-Let `best_known = ` shortest distance `start → target` on the **known map**
-(Dijkstra). Any *undiscovered* `start → target` path must, at some point, leave
-the known map — and the first node where it does so is some **frontier `f`**.
-Therefore its length is at least:
+Let `best_time = ` the minimum-**time** `start → target` route on the **known
+map** (`time_optimal_path`, §6.2). Any *undiscovered* `start → target` path must,
+at some point, leave the known map — and the first node where it does so is some
+**frontier `f`**. Since the robot can never travel faster than `v_max`, that
+path's time is at least:
 
 ```
-LB(f) = dist_known(start → f)  +  ‖ pos[f] − pos[target] ‖
-                                   └─ straight-line (Euclidean) distance ─┘
+LB_time(f) = ( dist_known(start → f)  +  ‖ pos[f] − pos[target] ‖ ) / v_max
+               └ known shortest distance ┘    └ straight-line lower bound ┘
 ```
 
-- `dist_known(start → f)` — shortest known distance to reach `f`.
-- The straight line is an **admissible lower bound**: in any maze a real path is
-  never shorter than the straight-line distance, so this never *over*-estimates.
+- `dist_known(start → f)` lower-bounds the length of the path's *known* prefix
+  (it ends at `f`, using known edges); the straight line lower-bounds the unknown
+  suffix `f → target`. Dividing the total length by `v_max` lower-bounds its time
+  (you cannot cover a distance in less time than at top speed). It is therefore
+  **admissible** — it never *over*-estimates the true time.
 
 ### 2.3 The pruning rule
 
 A frontier `f` is **useful** iff:
 
 ```
-LB(f) < best_known
+LB_time(f) < best_time
 ```
 
-- If `LB(f) ≥ best_known`, *no* path that first enters the unknown at `f` can
-  beat the best known path, so `f` is **pruned** — the robot never drives to it.
-- When **no useful frontier remains**, the best known path is provably optimal:
+- If `LB_time(f) ≥ best_time`, *no* path that first enters the unknown at `f` can
+  beat the best known route in time, so `f` is **pruned** — the robot never
+  drives to it.
+- When **no useful frontier remains**, the best known route is provably optimal:
   the robot stops exploring and goes home. This sets **`proven_optimal`** (if
   there were still pruned/unexplored frontiers) or **`fully_explored`** (if it
   had genuinely explored everything).
@@ -137,12 +148,16 @@ that still lets the robot wander down individual hopeless branches (e.g. a
 corridor heading away from the target on the far side). Per-frontier pruning
 skips those branches entirely.
 
+> Note: a faster robot (larger `v_max`) makes distance "cheaper" in time, so
+> `LB_time` is smaller and **fewer** frontiers are pruned — the robot rightly
+> insists on checking more straights before it can claim optimality.
+
 ### 2.4 Why it's safe (admissibility)
 
-Because `LB(f)` is a lower bound, pruning `f` can only remove paths whose true
-length is `≥ LB(f) ≥ best_known`. Such paths cannot be strictly shorter than the
-best one already known, so discarding them never changes the optimum. The
-returned fastest path is therefore still **provably optimal**.
+Because `LB_time(f)` is a lower bound on time, pruning `f` can only remove paths
+whose true time is `≥ LB_time(f) ≥ best_time`. Such paths cannot be strictly
+faster than the best one already known, so discarding them never changes the
+optimum. The returned fastest route is therefore **provably time-optimal**.
 
 ### 2.5 GUI flag
 
@@ -150,8 +165,11 @@ The solver's **Proof** field reflects this state:
 
 - `searching…` — target not found yet.
 - `checking…` — target found, still some useful frontier to verify.
-- `PROVEN ✓` — stopped early; fastest route proven with an **incomplete** map.
+- `PROVEN ✓` — stopped early; fastest route proven (by **time**) with an
+  **incomplete** map.
 - `full map` — had to explore everything to be sure.
+- `off (full)` — the **Optimized search** toggle is OFF, so the proof is
+  disabled and the robot maps the whole maze regardless.
 
 ---
 
@@ -164,25 +182,25 @@ predecessor tree from the current node. Each step still emits a command, so the
 
 ---
 
-## 4. Fastest path (current metric: distance)
+## 4. Fastest path (metric: TIME, acceleration-aware)
 
-Once home, the fastest path is computed with **Dijkstra on the DISCOVERED map**
-(`robot._known_adj()`), with each edge weighted by its **Euclidean length**:
+Once home, the fastest route is computed on the **DISCOVERED map**
+(`robot._known_adj()`) by **minimum drive TIME** under the motion model of §6
+(`time_optimal_path`). Computing it on the *discovered* map (not the true maze)
+is essential: in the early-stop case the robot has not seen every edge, and it
+must not "use" an edge it never drove.
 
-```
-weight(u, v) = ‖ pos[u] − pos[v] ‖
-```
+The robot then drives this path in the **FAST RUN** phase, animated with a real
+trapezoidal velocity profile (`FastRunPlan`): it glides smoothly, accelerating
+on clear straights and slowing to a stop at every turn. The traversed portion is
+coloured by **speed** (red = fast, green = slow). Alternative slower routes
+(found with Yen's K-shortest-by-distance) are drawn lighter so the fastest one
+stands out. The phase ends in **DONE**.
 
-Computing it on the *discovered* map (not the true maze) is essential: in the
-early-stop case the robot has not seen every edge, and it must not "use" an edge
-it never drove. Because of the §2 proof, the discovered-map optimum equals the
-true optimum.
-
-The robot then drives this path in the **FAST RUN** phase (animated, with
-commands), ending in **DONE**.
-
-> The metric here is **distance**. The acceleration-aware **time** metric is
-> future work — see §6.
+> The exploration early-stop proof (§2) bounds by **time** with the same
+> `v_max`, so the returned route is provably time-optimal over the *whole* maze,
+> not just the discovered part — whether it stopped early (`proven_optimal`) or
+> mapped everything (`fully_explored`).
 
 ---
 
@@ -218,31 +236,77 @@ real robot firmware will consume.
 
 ---
 
-## 6. Future work — acceleration-aware fastest path
+## 6. Acceleration-aware motion model (fastest path = time)
 
-The real robot's speed is **not constant**: it accelerates on straights and must
-**slow down for turns**. So the truly fastest path minimises **time**, not
-distance, and a longer but straighter route can beat a shorter twisty one.
+The robot's speed is **not constant**: it accelerates on straights and **stops
+for turns**. So the fastest path minimises **time**, not distance, and a longer
+but straighter route can beat a shorter twisty one. This is implemented in the
+simulator (`run_time`, `speed_at`, `time_optimal_path`, `FastRunPlan`).
 
-Planned model (for the final real-robot version):
+### 6.1 Velocity profile per straight run
 
-1. **Segment the path** into straight runs separated by turns (L/R/B).
-2. **Turn speed limits:** entering/leaving a turn caps the speed (e.g. `B` ≈
-   stop-and-turn, `L`/`R` a moderate cap, straight = full speed). A U-turn costs
-   the most.
-3. **Trapezoidal / S-curve velocity profile** per straight run: accelerate at
-   `a_max` from the entry speed, optionally cruise at `v_max`, decelerate to the
-   required exit speed before the next turn. Time per run is the area/duration of
-   that profile (closed-form given length, entry/exit speed, `a_max`, `v_max`).
-4. **Edge/path cost = total time** (sum of run times + turn times), and run a
-   shortest-*time* search (Dijkstra/DP) over the discovered graph. Because the
-   cost of a node depends on entry **and** exit direction (the turn there), the
-   state should be `(node, incoming_heading)` rather than just `node`.
-5. **Calibrate** `a_max`, `v_max`, and per-turn speed caps from the real robot's
-   encoder/IMU data.
+A **straight run** is a maximal sequence of collinear edges between two stops
+(the robot is at `v = 0` at both ends, because it stops at every turn — and at
+the start and the target). For a run of length `L` with `entry = exit = 0`, a
+**trapezoidal** profile is used: accelerate at `a_max` up to `v_max`, optionally
+cruise, then decelerate to 0. If `L` is too short to reach `v_max` the profile is
+a symmetric triangle. The closed-form time is (`run_time`):
 
-When this lands, only §4's metric changes (distance → time); §1–§3 (exploration,
-proof, return) stay the same.
+```
+d_acc = v_max² / (2·a_max)                       # distance to reach v_max
+if 2·d_acc ≤ L:  t = 2·(v_max/a_max) + (L − 2·d_acc)/v_max     # trapezoid
+else:            t = 2·√(a_max·L) / a_max                       # triangle
+```
+
+and the speed at arc-distance `s` into the run is (`speed_at`):
+
+```
+v(s) = min( v_max, √(2·a_max·s), √(2·a_max·(L−s)) )
+```
+
+This `v(s)` is exactly what drives the **red→green speed gradient** on the fast
+path, and `FastRunPlan` integrates it into a time→(position, speed) trajectory so
+the robot animates with real physics.
+
+### 6.2 Minimum-time search (`time_optimal_path`)
+
+Because the robot is stopped (`v = 0`) at every turn, a turn node fully
+"resets" its state — so the search state is just the **node**. We run Dijkstra on
+a *stop graph* whose edges are straight runs of **any** length between turn
+points, each edge costing `run_time(length)`:
+
+```
+from node u, for each compass direction d:
+    walk straight in d over the discovered map; every node w reached
+    is a candidate run-end with cost run_time(dist(u→w))
+```
+
+Driving straight through an intersection (no stop) is captured naturally: the
+spanning run edge from the previous turn to the next turn exists, so the optimum
+never pays for a needless stop. The result is expanded back into a full node list
+(including straight-through nodes) for animation and command generation.
+
+### 6.3 Units, alternative routes & GUI
+
+**Units are real-world:** 1 world unit = **1 cm** (grid spacing 20 → 20 cm), so
+`v_max` is cm/s and `a_max` is cm/s². Defaults: `v_max = 100`, `a_max = 50`,
+cautious explore speed `40`. `yen_k_shortest` (Yen's algorithm, by distance)
+surfaces a handful of other routes; each is timed with `path_time` and drawn
+**lighter the slower it is**, so the bold dark-green fastest route stands out.
+`v_max` / `a_max` are **Max speed** / **Max accel** sliders (re-planning the fast
+run live and kept in sync with the §2 proof). An **Optimized search** toggle
+disables the early-stop proof when the user wants a guaranteed full-map search.
+**Playback** is a separate real-time multiplier (`1x` = real time), independent
+of the robot's physical speed.
+
+### 6.4 Open work
+
+- Model turns as a finite speed cap / turn time instead of a full stop, and
+  **calibrate** `v_max`, `a_max`, and per-turn caps from encoder/IMU data.
+
+The exploration proof (§2) already shares this model's `v_max` to stay admissible
+for the time metric; the rest of §1 and §3 (frontier choice, return) are
+unchanged.
 
 ---
 
