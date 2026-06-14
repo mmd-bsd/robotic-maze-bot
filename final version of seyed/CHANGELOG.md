@@ -41,6 +41,22 @@
 
 ## History (newest first)
 
+### 2026-06-14 — Yellow stubs: solid lines, 5 cm, one-cycle delay, edge-enter removal
+- Unexplored-branch stubs are now **solid yellow lines of fixed 5 cm length**
+  (replaces the previous fixed-size yellow dots). A solid line reads more clearly
+  as "a branch continues this way" regardless of the edge's orientation or length,
+  and 5 cm is ¼ of the standard 20 cm node spacing — long enough to be visible
+  without overshooting to the next node.
+- **One-cycle visual delay:** stubs appear only when the robot graphic has
+  *visually arrived* at a node (tracked by new `_arrived_nodes` set), not when
+  the logical state advances. This prevents stubs from popping up at the
+  destination while the robot is still mid-glide.
+- **Removal-on-entry:** a stub disappears only when the robot enters that
+  specific edge (checked via `visited_edges`). Stubs persist across all
+  previously-visited nodes — they are not cleared just because the robot left.
+- Tools: `maze_solver.py` (`STUB_LEN=5.0`, `_draw_stubs`, `_arrived_nodes`),
+  `ARCHITECTURE.md`, `ALGORITHMS.md`, `CHANGELOG.md`.
+
 ### 2026-06-14 — Uniform yellow stub dots (fixed size, edge-length independent)
 - Unexplored-branch stubs are now **3 fixed-size dots** per branch (`STUB_DOT_R`,
   `STUB_DOT_SPACING`, `STUB_DOT_COUNT`) — identical on every edge, no scaling

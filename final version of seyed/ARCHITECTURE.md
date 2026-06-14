@@ -148,7 +148,7 @@ code between them.
 |---|---|
 | Grey thin line | Unexplored maze edge (not yet driven) |
 | Blue thick line | Visited / explored edge |
-| Yellow dots (fixed size) | Unexplored branch seen from a visited node (frontier) |
+| Yellow solid line (5 cm) | Unexplored branch seen from a visited node (frontier) |
 | Bold dark-green line | The **fastest** (minimum-time) route |
 | Lighter/thinner green lines | **Slower** alternative routes (lighter = slower) |
 | Red→green gradient on the fast path | Robot **speed** as it drives (red = fast, green = slow/at turns) |
@@ -252,7 +252,9 @@ These are hard-won; keep them in mind before changing the simulator.
 - **Known map** — the subset of nodes/edges the robot has actually driven
   (`visited_nodes`, `visited_edges`).
 - **Frontier** — a *visited* node that still has at least one *unexplored*
-  incident edge (drawn as fixed-size yellow dots along the branch direction).
+  incident edge (drawn as solid yellow lines, 5 cm long, along the branch
+  direction). Stubs appear only after the robot has visually arrived at the node
+  and disappear when the robot enters that specific edge.
 - **Heading** — the robot's current facing as a unit vector (N/E/S/W).
 - **Command** — `F` forward, `L` turn left, `R` turn right, `B` U-turn (reverse).
 - **proven_optimal** — exploration stopped early because no undiscovered path

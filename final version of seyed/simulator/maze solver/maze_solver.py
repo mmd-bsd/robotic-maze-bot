@@ -70,7 +70,7 @@ except Exception:  # noqa: BLE001
 
 # ----------------------------- Configuration ------------------------------- #
 NODE_RADIUS = 7
-STUB_LEN = 17.0
+STUB_LEN = 5.0
 
 # --- Motion model (acceleration-aware fast run) ---------------------------- #
 # REAL-WORLD UNITS: 1 world unit == 1 cm (the maze grid spacing is 20 -> 20 cm).
@@ -764,6 +764,7 @@ class SolverApp:
         self.anim_heading = None
         self._glide = None             # active explore glide, or None
         self._fast_arc = 0.0           # arc length covered on the fast path
+        self._arrived_nodes = set()    # nodes the robot graphic has visually reached
 
         self.scale = 2.0
         self.offset_x = 0.0
@@ -832,8 +833,8 @@ class SolverApp:
 
         tk.Label(pad, text="Maze Solver", font=FONT_TITLE, bg=PANEL_BG,
                  fg=FG).pack(anchor="w")
-        tk.Label(pad, text="SEYED \u2022 Final Version", font=("Segoe UI", 9),
-                 bg=PANEL_BG, fg=ACCENT).pack(anchor="w", pady=(0, 8))
+        # tk.Label(pad, text="SEYED \u2022 Final Version", font=("Segoe UI", 9),
+        #          bg=PANEL_BG, fg=ACCENT).pack(anchor="w", pady=(0, 8))
 
         toprow = tk.Frame(pad, bg=PANEL_BG)
         toprow.pack(fill=tk.X)
@@ -870,9 +871,9 @@ class SolverApp:
         self.speed.set(DEFAULT_PLAYBACK_INDEX)
         self.speed.pack(fill=tk.X)
 
-        # --- Robot motion model (real-world units; affects the fast run) --- #
-        tk.Label(pad, text="ROBOT MOTION MODEL", font=("Segoe UI", 8, "bold"),
-                 bg=PANEL_BG, fg=ACCENT2).pack(anchor="w", pady=(12, 0))
+        # # --- Robot motion model (real-world units; affects the fast run) --- #
+        # tk.Label(pad, text="ROBOT MOTION MODEL", font=("Segoe UI", 8, "bold"),
+        #          bg=PANEL_BG, fg=ACCENT2).pack(anchor="w", pady=(12, 0))
         self.var_vmax = tk.StringVar(value=f"{int(DEFAULT_VMAX)} cm/s")
         vh = tk.Frame(pad, bg=PANEL_BG)
         vh.pack(fill=tk.X, pady=(4, 0))
@@ -1128,6 +1129,7 @@ class SolverApp:
         self._glide = None
         self.anim_pos = self.maze.pos[self.maze.start]
         self.anim_heading = None
+        self._arrived_nodes = {self.maze.start}
         self.var_ptime.set("-")
         self.log.delete(0, tk.END)
         self._update_status_vars("-")
@@ -1216,6 +1218,7 @@ class SolverApp:
         if frac >= 1.0:
             self.anim_pos = (bx, by)
             self._glide = None
+            self._arrived_nodes.add(g["b"])
         self._update_status_vars(g["cmd"])
         return True
 
@@ -1261,6 +1264,7 @@ class SolverApp:
             if self._glide is not None:
                 g = self._glide
                 self.anim_pos = self.maze.pos[g["b"]]
+                self._arrived_nodes.add(g["b"])
                 self._glide = None
                 self._update_status_vars(g["cmd"])
             elif self.robot.exploration_complete:
@@ -1279,6 +1283,7 @@ class SolverApp:
                 self.anim_pos = self.maze.pos[rec["to"]]
                 self.anim_heading = direction(self.maze, rec["from"], rec["to"])
                 self.cur_speed = 0.0
+                self._arrived_nodes.add(rec["to"])
                 self._update_status_vars(rec["cmd"])
                 if self.robot.exploration_complete:
                     self._begin_fast_run()
@@ -1586,7 +1591,7 @@ class SolverApp:
     def _draw_stubs(self):
         if not self.robot:
             return
-        for u in self.robot.visited_nodes:
+        for u in self._arrived_nodes:
             x1, y1 = self.maze.pos[u]
             for v in self.maze.neighbors(u):
                 if tuple(sorted((u, v))) in self.robot.visited_edges:
@@ -1600,7 +1605,7 @@ class SolverApp:
                 cx1, cy1 = self.world_to_canvas(x1, y1)
                 cx2, cy2 = self.world_to_canvas(ex, ey)
                 self.canvas.create_line(cx1, cy1, cx2, cy2, fill=STUB_COLOR,
-                                        width=6, dash=(5, 3), capstyle=tk.ROUND)
+                                        width=6, capstyle=tk.ROUND)
 
     def _draw_paths(self):
         if self.phase not in ("FAST_RUN", "DONE"):

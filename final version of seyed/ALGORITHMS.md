@@ -43,7 +43,7 @@ EXPLORE  ──(no useful branch left)──►  return home  ──►  FAST_RU
   leaves this junction in that direction, but I haven't driven it yet".)
 - **Frontier**: a *visited* node that still has at least one unexplored
   neighbour. Frontiers are the boundary between known and unknown, drawn as
-  **yellow dashed stubs**.
+  **yellow solid stubs (5 cm length)**.
 
 ### 1.2 The step rule
 
