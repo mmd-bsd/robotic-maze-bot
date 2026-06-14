@@ -3,7 +3,9 @@
 > Read this first in any new session. It explains what the project is, how the
 > repository is laid out, how the simulator works, and the conventions/rules
 > that have been established so far. Algorithm details live in
-> [`ALGORITHMS.md`](./ALGORITHMS.md).
+> [`ALGORITHMS.md`](./ALGORITHMS.md); the running history of changes, decisions,
+> and gotchas lives in [`CHANGELOG.md`](./CHANGELOG.md) — **skim it too, and add
+> an entry there whenever you change the code.**
 
 ---
 
@@ -52,7 +54,8 @@ SEYED/
 │   │       ├── sample_maze.json     27-node demo maze (ported from sim_V12)
 │   │       └── sample_maze2.json    larger demo with a far branch (tests pruning)
 │   ├── ARCHITECTURE.md              <-- this file
-│   └── ALGORITHMS.md                algorithm + command-generation reference
+│   ├── ALGORITHMS.md                algorithm + command-generation reference
+│   └── CHANGELOG.md                 running worklog/history (keep it updated)
 │
 ├── New Start/                       Previous iteration (reference, do not break)
 │   ├── Simulator/
@@ -145,7 +148,7 @@ code between them.
 |---|---|
 | Grey thin line | Unexplored maze edge (not yet driven) |
 | Blue thick line | Visited / explored edge |
-| Yellow dashed stub | Unexplored branch seen from a visited node (frontier) |
+| Yellow dots (fixed size) | Unexplored branch seen from a visited node (frontier) |
 | Bold dark-green line | The **fastest** (minimum-time) route |
 | Lighter/thinner green lines | **Slower** alternative routes (lighter = slower) |
 | Red→green gradient on the fast path | Robot **speed** as it drives (red = fast, green = slow/at turns) |
@@ -236,6 +239,9 @@ These are hard-won; keep them in mind before changing the simulator.
 18. Don't break `New Start/` or `old docs/`; treat them as read-only history.
 19. When unsure about a product decision (data format, scope, UX), ask — the
     user prefers being consulted on meaningful trade-offs.
+20. **Always update [`CHANGELOG.md`](./CHANGELOG.md)** in the same turn you
+    change the code: append a dated entry (newest first) with what/why/decisions
+    and any new lessons. Keep `ARCHITECTURE.md`/`ALGORITHMS.md` in sync too.
 
 ---
 
@@ -246,7 +252,7 @@ These are hard-won; keep them in mind before changing the simulator.
 - **Known map** — the subset of nodes/edges the robot has actually driven
   (`visited_nodes`, `visited_edges`).
 - **Frontier** — a *visited* node that still has at least one *unexplored*
-  incident edge (drawn as a yellow dashed stub).
+  incident edge (drawn as fixed-size yellow dots along the branch direction).
 - **Heading** — the robot's current facing as a unit vector (N/E/S/W).
 - **Command** — `F` forward, `L` turn left, `R` turn right, `B` U-turn (reverse).
 - **proven_optimal** — exploration stopped early because no undiscovered path
