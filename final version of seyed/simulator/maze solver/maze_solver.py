@@ -60,6 +60,7 @@ import json
 import math
 import os
 import tkinter as tk
+import tkinter.ttk as ttk
 from tkinter import filedialog, messagebox
 
 try:
@@ -737,6 +738,17 @@ class SolverApp:
         self.root.title("Maze Solver - SEYED")
         self.root.configure(bg=BG)
 
+        # --- Slider style: white thumb/handle ---
+        _s = ttk.Style()
+        _s.theme_use('clam')
+        _s.configure('white.Horizontal.TScale',
+                     background='white',
+                     troughcolor=CARD_BG,
+                     sliderthickness=18,
+                     sliderrelief='flat')
+        _s.map('white.Horizontal.TScale',
+               background=[('active', '#d0d0d0'), ('!active', 'white')])
+
         self.maze = None
         self.robot = None
         self.phase = "IDLE"
@@ -863,11 +875,9 @@ class SolverApp:
         self.var_playback = tk.StringVar(value=self._fmt_mult(self.playback))
         tk.Label(prow, textvariable=self.var_playback, font=("Segoe UI", 9, "bold"),
                  bg=PANEL_BG, fg=ACCENT).pack(side=tk.RIGHT)
-        self.speed = tk.Scale(pad, from_=0, to=len(PLAYBACK_VALUES) - 1,
-                              orient=tk.HORIZONTAL, command=self._on_playback,
-                              showvalue=False, bg=PANEL_BG, fg=FG,
-                              troughcolor=CARD_BG, highlightthickness=0,
-                              bd=0, activebackground=ACCENT, sliderrelief=tk.FLAT)
+        self.speed = ttk.Scale(pad, from_=0, to=len(PLAYBACK_VALUES) - 1,
+                               orient=tk.HORIZONTAL, command=self._on_playback,
+                               style='white.Horizontal.TScale')
         self.speed.set(DEFAULT_PLAYBACK_INDEX)
         self.speed.pack(fill=tk.X)
 
@@ -881,11 +891,9 @@ class SolverApp:
                  fg=FG_MUTED).pack(side=tk.LEFT)
         tk.Label(vh, textvariable=self.var_vmax, font=("Segoe UI", 8, "bold"),
                  bg=PANEL_BG, fg=FG).pack(side=tk.RIGHT)
-        self.vmax_scale = tk.Scale(pad, from_=10, to=200, orient=tk.HORIZONTAL,
-                                   command=self._on_vmax, showvalue=False,
-                                   bg=PANEL_BG, fg=FG, troughcolor=CARD_BG,
-                                   highlightthickness=0, bd=0,
-                                   activebackground=ACCENT2, sliderrelief=tk.FLAT)
+        self.vmax_scale = ttk.Scale(pad, from_=10, to=200, orient=tk.HORIZONTAL,
+                                    command=self._on_vmax,
+                                    style='white.Horizontal.TScale')
         self.vmax_scale.set(int(DEFAULT_VMAX))
         self.vmax_scale.pack(fill=tk.X)
         self.var_accel = tk.StringVar(value=f"{int(DEFAULT_ACCEL)} cm/s\u00b2")
@@ -895,11 +903,9 @@ class SolverApp:
                  fg=FG_MUTED).pack(side=tk.LEFT)
         tk.Label(ah, textvariable=self.var_accel, font=("Segoe UI", 8, "bold"),
                  bg=PANEL_BG, fg=FG).pack(side=tk.RIGHT)
-        self.accel_scale = tk.Scale(pad, from_=10, to=200, orient=tk.HORIZONTAL,
-                                    command=self._on_accel, showvalue=False,
-                                    bg=PANEL_BG, fg=FG, troughcolor=CARD_BG,
-                                    highlightthickness=0, bd=0,
-                                    activebackground=ACCENT2, sliderrelief=tk.FLAT)
+        self.accel_scale = ttk.Scale(pad, from_=10, to=200, orient=tk.HORIZONTAL,
+                                     command=self._on_accel,
+                                     style='white.Horizontal.TScale')
         self.accel_scale.set(int(DEFAULT_ACCEL))
         self.accel_scale.pack(fill=tk.X)
 
