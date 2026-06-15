@@ -96,14 +96,22 @@ robot codes/
 
 ## Build commands
 
-```powershell
-# Build and run all tests
-gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -o test/test_graph.exe
-gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o test/test_robot.exe
-gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/integration_test.c -lm -o test/integration_test.exe
-gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_hal_compile.c -lm -o test/test_hal_compile.exe
+All commands run from `robot codes/`.  Output goes to `build/` (gitignored).
 
-./test/test_graph.exe && ./test/test_robot.exe && ./test/integration_test.exe && ./test/test_hal_compile.exe
+See **[BUILD_GUIDE.md](./BUILD_GUIDE.md)** for the full guide.
+
+```powershell
+# Add GCC to PATH (once per session)
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+
+# Build all tests
+gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -o build/test_graph.exe
+gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o build/test_robot.exe
+gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/integration_test.c -lm -o build/integration_test.exe
+gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_hal_compile.c -lm -o build/test_hal_compile.exe
+
+# Run all
+./build/test_graph.exe; ./build/test_robot.exe; ./build/integration_test.exe; ./build/test_hal_compile.exe
 ```
 
 ## Design decisions (don't change without asking)

@@ -2,8 +2,8 @@
  * @file test_robot.c
  * @brief Unit tests for the robot module.
  *
- * Compile:
- *   gcc -std=c11 -Wall -Wextra -I../inc ../src/maze_graph.c ../src/maze_robot.c test_robot.c -o test_robot
+ * Compile (from robot codes/):
+ *   gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o build/test_robot.exe
  */
 
 #include "maze_robot.h"

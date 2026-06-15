@@ -41,6 +41,14 @@
 
 ## History (newest first)
 
+### 2026-06-15 — Build folder clean-up + BUILD_GUIDE.md
+- **Moved all `.exe` files** from `test/` to new `build/` folder (gitignored).
+- **Added `*.exe` to `.gitignore`** — no compiled binaries in the repo.
+- **Created `BUILD_GUIDE.md`** in `robot codes/` — full build/run commands, file layout, pipeline diagram, module dependency tree.
+- **Fixed stale compile paths** in all 4 test file comments (old `-I../inc` → `-I inc`, output `-o build/...exe`).
+- **Updated `STATUS.md`** build commands to use `build/` folder + point to new guide.
+- Files: `BUILD_GUIDE.md` (new), `build/` (new), `.gitignore`, `STATUS.md`, `test/test_graph.c`, `test/test_robot.c`, `test/integration_test.c`, `test/test_hal_compile.c`.
+
 ### 2026-06-15 — Reorganised: C code moved to `robot codes/`
 - **Moved all C solver files** from `simulator/maze solver/maze_solver_c/` to
   `robot codes/` under `final version of seyed/`.  The C solver is NOT part of

@@ -8,12 +8,12 @@
  *   2. maze_hal_init() and maze_hal_tick() can be called.
  *   3. All linker symbols resolve against the real solver modules.
  *
- * Compile:
+ * Compile (from robot codes/):
  *   gcc -std=c11 -Wall -Wextra -pedantic -Werror \
- *       -I../inc ../src/maze_graph.c ../src/maze_robot.c \
- *       ../src/maze_explore.c ../src/maze_proof.c \
- *       ../src/maze_fastrun.c ../src/maze_solver.c \
- *       test_hal_compile.c -lm -o test_hal_compile
+ *       -I inc src/maze_graph.c src/maze_robot.c \
+ *       src/maze_explore.c src/maze_proof.c \
+ *       src/maze_fastrun.c src/maze_solver.c \
+ *       test/test_hal_compile.c -lm -o build/test_hal_compile.exe
  */
 
 #include "maze_hal.h"

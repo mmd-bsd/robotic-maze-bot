@@ -5,8 +5,8 @@
  * Builds a known graph (the 27-node sample maze from sample_maze.json,
  * embedded as static data), then exercises every public function.
  *
- * Compile:
- *   gcc -std=c11 -Wall -Wextra -I../inc ../src/maze_graph.c test_graph.c -o test_graph
+ * Compile (from robot codes/):
+ *   gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -o build/test_graph.exe
  */
 
 #include "maze_graph.h"

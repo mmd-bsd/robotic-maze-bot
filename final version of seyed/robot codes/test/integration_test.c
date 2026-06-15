@@ -2,10 +2,10 @@
  * @file integration_test.c
  * @brief Full-mission integration test on the 27-node sample maze.
  *
- * Compile:
- *   gcc -std=c11 -Wall -Wextra -I../inc ../src/maze_graph.c ../src/maze_robot.c
- *        ../src/maze_explore.c ../src/maze_proof.c ../src/maze_fastrun.c
- *        ../src/maze_solver.c integration_test.c -lm -o integration_test
+ * Compile (from robot codes/):
+ *   gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c
+ *        src/maze_explore.c src/maze_proof.c src/maze_fastrun.c
+ *        src/maze_solver.c test/integration_test.c -lm -o build/integration_test.exe
  *
  * Strategy (incremental discovery — simulates real robot behaviour):
  *   - All node coordinates and true-maze edges are embedded from sample_maze.json.
@@ -196,7 +196,7 @@ int main(void) {
            r.proof_state == MAZE_PROOF_FULL   ? "FULL" : "DISABLED");
     P();
 
-    T("Start→target path exists");
+    T("Start totarget path exists");
     uint32_t dist = maze_graph_path_distance(&g, g.start_node, g.target_node);
     if (dist == UINT32_MAX) { F("no path"); goto done; }
     if (dist == 0) { F("zero distance"); goto done; }
