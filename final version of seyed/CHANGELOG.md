@@ -41,6 +41,15 @@
 
 ## History (newest first)
 
+### 2026-06-15 — Increased memory limits to 100 nodes + macro-ified all struct sizes
+- **MAZE_MAX_NODES 50→100, MAZE_MAX_EDGES 100→200, MAZE_MAX_PATH_LENGTH 50→100, MAZE_MAX_FRONTIERS 20→40, MAZE_COMMAND_LOG_SIZE 512→1024, MAZE_EXPLORATION_TIMEOUT 1000→2000.**
+- **maze_types.h structs now use `MAZE_MAX_*` macros** instead of hardcoded `[50]`/`[100]`/`[512]`.  Added `#include "maze_config.h"` to maze_types.h so the macros are available at struct-definition time.
+- **All .c files updated:** replaced every hardcoded `[50]`/`<50`/`, 50)` with the appropriate `MAZE_MAX_*` macro (graph heap, Dijkstra dist/parent/visited, path buffers, fast-run stop-graph arrays, frontier tracking).
+- **sample_maze3.json now works** — 56 nodes needed this bump.  Result: 95 steps, target found, fast path 13 nodes / 9.14s, 240 cm.
+- **Memory estimate:** ~6.1 KB with 100-node defaults (still safe on STM32G0's 8KB RAM).
+- **21 unit tests + 3 maze runs verified** (sample_maze, sample_maze4, sample_maze3).
+- Files: `maze_config.h`, `maze_types.h`, `maze_graph.c`, `maze_robot.c`, `maze_explore.c`, `maze_fastrun.c`, `maze_solver.c`, `CHANGELOG.md`.
+
 ### 2026-06-15 — Scripted maze runner: feed .json, get result (no C editing)
 - **Created `scripts/run_maze.py`** -- reads any maze `.json` from the simulator,
   generates `test/_maze_data.h`, compiles + runs `run_maze.c`, prints full results

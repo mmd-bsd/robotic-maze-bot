@@ -24,35 +24,36 @@
  *
  *     Component               Default    Bytes
  *     ─────────────────────   ────────   ─────
- *     Nodes (50 × 10 B)       MAX_NODES     500
- *     Edges (100 × 10 B)      MAX_EDGES    1000
- *     Adjacency (50 × 4 × 2)  —             400
- *     Dijkstra arrays          —             400
- *     Path buffers (50 × 2B)  —             100
- *     Command log              —             512
- *     Trajectory points        —             200
+ *     Nodes (100 × 10 B)      MAX_NODES    1000
+ *     Edges (200 × 10 B)      MAX_EDGES    2000
+ *     Adjacency (100 × 4 × 2)  —            800
+ *     Dijkstra arrays          —            800
+ *     Path buffers (100 × 2B)  —            200
+ *     Command log              —           1024
+ *     Frontier tracking        —             80
+ *     Trajectory points        —            200
  *     ─────────────────────────────────────────
- *     TOTAL                                ~3112
+ *     TOTAL                                ~6104
  *============================================================================*/
 
 /** Maximum maze intersections the robot can discover. */
 #ifndef MAZE_MAX_NODES
-#define MAZE_MAX_NODES          50
+#define MAZE_MAX_NODES          100
 #endif
 
 /** Maximum traversable line segments between nodes. */
 #ifndef MAZE_MAX_EDGES
-#define MAZE_MAX_EDGES          100
+#define MAZE_MAX_EDGES          200
 #endif
 
 /** Maximum path length (nodes) for navigation buffers. */
 #ifndef MAZE_MAX_PATH_LENGTH
-#define MAZE_MAX_PATH_LENGTH    50
+#define MAZE_MAX_PATH_LENGTH    100
 #endif
 
 /** Maximum number of frontier nodes to track concurrently. */
 #ifndef MAZE_MAX_FRONTIERS
-#define MAZE_MAX_FRONTIERS      20
+#define MAZE_MAX_FRONTIERS      40
 #endif
 
 /** Maximum trajectory points for the fast-run acceleration profile. */
@@ -62,7 +63,7 @@
 
 /** Command-log buffer size (F/L/R/B characters). */
 #ifndef MAZE_COMMAND_LOG_SIZE
-#define MAZE_COMMAND_LOG_SIZE   512
+#define MAZE_COMMAND_LOG_SIZE   1024
 #endif
 
 /*============================================================================
@@ -112,10 +113,10 @@
 #endif
 
 /** Maximum exploration steps before a safety timeout (prevents infinite
- *  loops if something goes wrong with sensor detection).  For a 50-node
- *  maze, 1000 steps is generous (allows backtracking). */
+ *  loops if something goes wrong with sensor detection).  For a 100-node
+ *  maze, 2000 steps is generous (allows backtracking). */
 #ifndef MAZE_EXPLORATION_TIMEOUT
-#define MAZE_EXPLORATION_TIMEOUT 1000
+#define MAZE_EXPLORATION_TIMEOUT 2000
 #endif
 
 /** Delay (in sensor read cycles, ~2ms each) before the robot decides

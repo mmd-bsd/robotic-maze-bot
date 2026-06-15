@@ -132,10 +132,10 @@ MazeCommand maze_explore_step(MazeRobot* robot,
                                                   v_max_fp, a_max_fp);
     if (frontier != MAZE_INVALID_NODE) {
         /* Compute path to frontier */
-        uint16_t path[50];
+        uint16_t path[MAZE_MAX_PATH_LENGTH];
         uint16_t plen = maze_graph_shortest_path(robot->graph,
                                                   robot->current_node,
-                                                  frontier, path, 50);
+                                                  frontier, path, MAZE_MAX_PATH_LENGTH);
         if (plen >= 2) {
             /* Set up multi-step path following */
             maze_robot_set_path(robot, path, plen);

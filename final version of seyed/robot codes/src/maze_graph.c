@@ -5,7 +5,7 @@
  * Implements the KNOWN MAP — the subset of the true maze the robot has
  * physically discovered.  All pathfinding operates ONLY on explored edges.
  *
- * Dijkstra uses a binary heap; typical maze size (< 50 nodes) makes this
+ * Dijkstra uses a binary heap; typical maze size (< 100 nodes) makes this
  * comfortably fast even on Cortex-M0+.
  */
 
@@ -46,7 +46,7 @@ typedef struct {
 } HeapEntry;
 
 typedef struct {
-    HeapEntry data[50];       /* MAZE_MAX_NODES                    */
+    HeapEntry data[MAZE_MAX_NODES];                   /**< Heap storage                        */
     uint16_t  size;
 } MinHeap;
 
@@ -322,7 +322,7 @@ void maze_graph_dijkstra(const MazeGraph* graph,
     if (!graph || !dist_cm || !parent) return;
 
     uint16_t  n       = graph->node_count;
-    bool      visited[50] = {0};        /* MAZE_MAX_NODES, stack-allocated */
+    bool      visited[MAZE_MAX_NODES] = {0}; /* stack-allocated */
 
     for (uint16_t i = 0; i < n; i++) {
         dist_cm[i] = UINT32_MAX;
@@ -375,17 +375,17 @@ uint16_t maze_graph_shortest_path(const MazeGraph* graph,
         return 1;
     }
 
-    uint32_t dist[50];
-    uint16_t parent[50];
+    uint32_t dist[MAZE_MAX_NODES];
+    uint16_t parent[MAZE_MAX_NODES];
     maze_graph_dijkstra(graph, start, dist, parent);
 
     if (dist[end] == UINT32_MAX) return 0;   /* unreachable */
 
     /* Reconstruct path backwards, then reverse in-place */
-    uint16_t rev[50];   /* MAZE_MAX_PATH_LENGTH */
+    uint16_t rev[MAZE_MAX_PATH_LENGTH];
     uint16_t len = 0;
     uint16_t cur = end;
-    while (cur != MAZE_INVALID_NODE && len < 50) {
+    while (cur != MAZE_INVALID_NODE && len < MAZE_MAX_PATH_LENGTH) {
         rev[len++] = cur;
         cur = parent[cur];
     }
@@ -404,8 +404,8 @@ uint32_t maze_graph_path_distance(const MazeGraph* graph,
     if (!graph || start >= graph->node_count || end >= graph->node_count)
         return UINT32_MAX;
 
-    uint32_t dist[50];
-    uint16_t parent[50];
+    uint32_t dist[MAZE_MAX_NODES];
+    uint16_t parent[MAZE_MAX_NODES];
     maze_graph_dijkstra(graph, start, dist, parent);
     return dist[end];
 }

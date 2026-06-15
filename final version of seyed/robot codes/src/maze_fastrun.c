@@ -88,9 +88,9 @@ uint16_t maze_time_optimal_path(const MazeGraph* graph,
     if (start == target) { path_out[0] = start; return 1; }
 
     uint16_t n = graph->node_count;
-    float    best_time[50];
-    uint16_t prev_turn[50];
-    bool     settled[50];
+    float    best_time[MAZE_MAX_NODES];
+    uint16_t prev_turn[MAZE_MAX_NODES];
+    bool     settled[MAZE_MAX_NODES];
 
     for (uint16_t i = 0; i < n; i++) {
         best_time[i] = FLT_MAX;
@@ -158,10 +158,10 @@ uint16_t maze_time_optimal_path(const MazeGraph* graph,
     if (best_time[target] >= FLT_MAX) return 0;
 
     /* Reconstruct turn-node path */
-    uint16_t turn_path[50];
+    uint16_t turn_path[MAZE_MAX_NODES];
     uint16_t tlen = 0;
     uint16_t cur = target;
-    while (cur != MAZE_INVALID_NODE && tlen < 50) {
+    while (cur != MAZE_INVALID_NODE && tlen < MAZE_MAX_NODES) {
         turn_path[tlen++] = cur;
         cur = prev_turn[cur];
     }
@@ -174,7 +174,7 @@ uint16_t maze_time_optimal_path(const MazeGraph* graph,
     }
 
     /* Expand: fill intermediate nodes between consecutive turn nodes */
-    uint16_t expanded[50];
+    uint16_t expanded[MAZE_MAX_PATH_LENGTH];
     uint16_t elen = 0;
 
     for (uint16_t ti = 0; ti < tlen && elen < max_len; ti++) {
@@ -223,8 +223,8 @@ uint32_t maze_time_optimal_cost(const MazeGraph* graph,
         return UINT32_MAX;
 
     uint16_t n = graph->node_count;
-    float    best_time[50];
-    bool     settled[50];
+    float    best_time[MAZE_MAX_NODES];
+    bool     settled[MAZE_MAX_NODES];
 
     for (uint16_t i = 0; i < n; i++) {
         best_time[i] = FLT_MAX;
@@ -293,12 +293,12 @@ bool maze_fastrun_build_plan(MazeRobot* robot,
     if (!robot->target_found) return false;
 
     /* Find time-optimal path */
-    uint16_t path_nodes[50];
+    uint16_t path_nodes[MAZE_MAX_PATH_LENGTH];
     uint16_t plen = maze_time_optimal_path(robot->graph,
                                            robot->graph->start_node,
                                            robot->graph->target_node,
                                            v_max_fp, a_max_fp,
-                                           path_nodes, 50);
+                                           path_nodes, MAZE_MAX_PATH_LENGTH);
     if (plen == 0) return false;
 
     /* Store the path */

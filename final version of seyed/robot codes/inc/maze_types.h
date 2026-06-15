@@ -14,6 +14,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "maze_config.h"
 
 /*============================================================================
  * COMPASS HEADING
@@ -137,8 +138,8 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    MazeNode  nodes[50];      /**< Node array  (max from maze_config.h)        */
-    MazeEdge  edges[100];     /**< Edge array                                  */
+    MazeNode  nodes[MAZE_MAX_NODES];      /**< Node array  (max from maze_config.h)        */
+    MazeEdge  edges[MAZE_MAX_EDGES];      /**< Edge array                                  */
     uint16_t  node_count;     /**< Current number of nodes in known map        */
     uint16_t  edge_count;     /**< Current number of edges in known map        */
     uint16_t  start_node;     /**< Index of the start node                     */
@@ -195,20 +196,20 @@ typedef struct {
     bool            use_proof;     /**< Optimized-search toggle (early stop)   */
 
     /* --- Known map tracking --- */
-    bool visited_nodes[50];       /**< Boolean array: node[i] visited?         */
-    bool explored_edges[100];     /**< Boolean array: edge[i] explored?        */
+    bool visited_nodes[MAZE_MAX_NODES];      /**< Boolean array: node[i] visited?         */
+    bool explored_edges[MAZE_MAX_EDGES];    /**< Boolean array: edge[i] explored?        */
 
     /* --- Command log --- */
-    char    command_log[512];    /**< F/L/R/B command stream                   */
+    char    command_log[MAZE_COMMAND_LOG_SIZE]; /**< F/L/R/B command stream              */
     uint16_t command_count;      /**< Number of commands emitted               */
 
     /* --- Navigation state (multi-step path following) --- */
-    uint16_t path_buffer[50];    /**< Current Dijkstra path (node indices)     */
+    uint16_t path_buffer[MAZE_MAX_PATH_LENGTH]; /**< Current Dijkstra path              */
     uint16_t path_length;        /**< Number of nodes in path_buffer           */
     uint16_t path_index;         /**< Current step within path_buffer          */
 
     /* --- Fast-run plan --- */
-    uint16_t fast_path_nodes[50];    /**< Node sequence of the fastest route   */
+    uint16_t fast_path_nodes[MAZE_MAX_PATH_LENGTH]; /**< Node sequence of fastest route */
     uint16_t fast_path_length;       /**< Number of nodes in fast_path         */
     float    fast_path_time_s;       /**< Total drive time of fastest route (s)*/
     MazeTrajectoryPoint* fast_traj;  /**< Precomputed trajectory (or NULL)     */

@@ -170,11 +170,11 @@ MazeCommand maze_solver_step(MazeRobot* robot,
                 /* fall through to FAST_RUN setup */
             } else {
                 /* Compute path home */
-                uint16_t path[50];
+                uint16_t path[MAZE_MAX_PATH_LENGTH];
                 uint16_t plen = maze_graph_shortest_path(robot->graph,
                                                           robot->current_node,
                                                           robot->graph->start_node,
-                                                          path, 50);
+                                                          path, MAZE_MAX_PATH_LENGTH);
                 if (plen >= 2) {
                     maze_robot_set_path(robot, path, plen);
                     return maze_robot_step_path(robot);
