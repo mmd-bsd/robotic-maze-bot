@@ -1,23 +1,64 @@
-# BUILD GUIDE — SEYED C Maze Solver
+# BUILD GUIDE -- SEYED C Maze Solver
 
 **Location:** `final version of seyed/robot codes/`
 
 ---
 
-## Prerequisites
+## How to run a maze
 
-- **GCC** 8+ (MSYS2 MinGW recommended)
-  ```powershell
-  # Add to PATH (once per PowerShell session)
-  $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+Design a maze in the simulator, save it as `.json`, then:
 
-  # Verify
-  gcc --version
-  ```
-- All commands are run **from the `robot codes/` folder**:
-  ```powershell
-  cd "F:\Robotic fle 2022\SEYED\final version of seyed\robot codes"
-  ```
+```powershell
+# Test any maze in one command:
+python scripts/run_maze.py ../simulator/mazes/sample_maze.json
+python scripts/run_maze.py ../simulator/mazes/sample_maze4.json
+python scripts/run_maze.py ../simulator/mazes/your_maze.json
+```
+
+What it does automatically:
+1. Reads the `.json`
+2. Generates `test/_maze_data.h` (temp)
+3. Compiles `run_maze.c` + all solver sources
+4. Runs the `.exe` and prints results
+5. Cleans up `_maze_data.h`
+
+Example output:
+
+```
+=== Maze Run: sample_maze4.json ===
+  Nodes: 37, Edges: 37
+  Start: (-20,-20)  Target: (40,-120)
+
+-- Results --
+  Steps:             97
+  Commands:          97
+  Target found:      yes
+  Phase:             DONE
+  Proof state:       FULL (mapped everything)
+  Fast path nodes:   23
+  Fast path time:    12.30 s
+  Shortest distance: 240 cm
+
+  Command stream (full mission): FFFRRLLRRLLRLFFFFFL...FFFFFFFRFFFFFRFFFFF
+  Fast-run command stream:          FLRFFFFFFFRFFFFFRFFFFF
+```
+
+**No C code editing per maze.** Just point at a `.json` file.
+
+---
+
+## How to rebuild everything after code changes
+
+```powershell
+.\scripts\build_all.ps1
+```
+
+This builds and runs all unit tests (21 tests total):
+- `test_graph.exe` (6 tests) -- nodes, edges, Dijkstra
+- `test_robot.exe` (7 tests) -- heading, commands, frontiers
+- `integration_test.exe` (8 tests) -- full mission on sample_maze
+
+(Also builds `test_hal_compile.exe` for STM32 HAL verification, but doesn't auto-run it.)
 
 ---
 
@@ -25,6 +66,9 @@
 
 ```
 robot codes/
+├── scripts/                     # Automation tools
+│   ├── run_maze.py                Feed any .json → build → run → result
+│   └── build_all.ps1              Rebuild + run all unit tests
 ├── inc/                         # Headers (8 files)
 │   ├── maze_types.h               Structs, enums, MazeCommand
 │   ├── maze_config.h              Memory limits, motion params
@@ -43,122 +87,49 @@ robot codes/
 │   ├── maze_fastrun.c
 │   └── maze_solver.c
 ├── test/                        # Test programs (5 files)
+│   ├── run_maze.c                 Generic runner (reads _maze_data.h)
 │   ├── test_graph.c               Unit: graph module (6 tests)
 │   ├── test_robot.c               Unit: robot module (7 tests)
-│   ├── integration_test.c         Full mission on 27-node maze (8 tests)
-│   ├── test_maze4.c               Full mission on 37-node maze (8 tests)
+│   ├── integration_test.c         Full mission on sample_maze (8 tests)
 │   └── test_hal_compile.c         HAL bridge smoke test (10 tests)
 └── build/                       # Output .exe files (gitignored)
+    ├── run_maze.exe
     ├── test_graph.exe
     ├── test_robot.exe
     ├── integration_test.exe
-    ├── test_maze4.exe
     └── test_hal_compile.exe
 ```
 
 ---
 
-## Build & run commands
+## Manual build commands (rarely needed)
 
-### Run all tests (one command)
-
-```powershell
-# Build everything
-gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -o build/test_graph.exe; gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o build/test_robot.exe; gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/integration_test.c -lm -o build/integration_test.exe; gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_maze4.c -lm -o build/test_maze4.exe; gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_hal_compile.c -lm -o build/test_hal_compile.exe; echo "=== ALL BUILDS DONE ==="
-
-# Run all
-./build/test_graph.exe; ./build/test_robot.exe; ./build/integration_test.exe; ./build/test_maze4.exe; ./build/test_hal_compile.exe
-```
-
----
-
-### Test 1 — Graph module (6 tests)
+### Test 1 -- Graph module
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -o build/test_graph.exe
 ./build/test_graph.exe
 ```
 
-Verifies: node add/find, edge add/explore, neighbors, Dijkstra shortest-path by real distance.
-
----
-
-### Test 2 — Robot module (7 tests)
+### Test 2 -- Robot module
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o build/test_robot.exe
 ./build/test_robot.exe
 ```
 
-Verifies: heading tracking, F/L/R/B command generation, frontier detection, branch ranking (turn-minimizing), path following.
-
----
-
-### Test 3 — Full mission integration (8 tests)
+### Test 3 -- Integration (sample_maze)
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/integration_test.c -lm -o build/integration_test.exe
 ./build/integration_test.exe
 ```
 
-Verifies the **complete pipeline** on the 27-node sample maze with incremental discovery:
-
-```
-=== Integration Test - Full Mission on sample_maze ===
-  Init solver at start (0,0)                           PASS
-  Reveal start node and its edges                      PASS
-  Full mission loop                                    (53 steps, 53 commands) PASS
-  Mission completed all phases                         PASS
-  Command log non-empty                                (53 cmds) PASS
-  Fast path computed                                   (len=8, time=6.50s) PASS
-  Proof state terminal                                 (FULL) PASS
-  Start→target path exists                             (140 cm) PASS
-
-  Command stream (full mission): FFFFFBLLBRFLLRFRFRFRFBRBRLLRLLRFLRRRRLLLBLRBRBFFFLRLF
-  Fast-run command stream:          FFFLRLF
-
-8 tests, 0 failed
-```
-
-This is the most important test — it proves the algorithm works before putting it on the robot.
-
----
-
-### Test 4 — HAL bridge (10 tests)
+### Test 4 -- HAL bridge
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_hal_compile.c -lm -o build/test_hal_compile.exe
 ./build/test_hal_compile.exe
-```
-
-Verifies: `maze_hal_init()` / `maze_hal_tick()` with stubbed firmware globals, branch discovery from sensors, target detection, `maze_cmd_to_cross()` mappings, direct motor control.
-
----
-
-### Test 5 — Custom maze: sample_maze4 (8 tests)
-
-```powershell
-gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_maze4.c -lm -o build/test_maze4.exe
-./build/test_maze4.exe
-```
-
-Verifies the **complete pipeline** on `sample_maze4.json` (37 nodes, 37 edges, start at (-20,-20), target at (40,-120)):
-
-```
-=== Integration Test - sample_maze4 (37 nodes) ===
-  Init solver at start (-20,-20)                       PASS
-  Reveal start node and its edges                      PASS
-  Full mission loop                                    (97 steps, 97 commands) PASS
-  Mission completed all phases                         PASS
-  Command log non-empty                                (97 cmds) PASS
-  Fast path computed                                   (len=23, time=12.30s) PASS
-  Proof state terminal                                 (FULL) PASS
-  Start->target path exists                            (240 cm) PASS
-
-  Command stream (full mission): FFFRRLLRRLLRLFFFFFLFFFFFLFFFFFFFLBRFFFRFBFRFFFRFFFFFRFFFRFBFRFRLRRLLRRLLFFRRLRFFFFFFFRFFFFFRFFFFF
-  Fast-run command stream:          FLRFFFFFFFRFFFFFRFFFFF
-
-8 tests, 0 failed
 ```
 
 ---
@@ -169,20 +140,20 @@ Verifies the **complete pipeline** on `sample_maze4.json` (37 nodes, 37 edges, s
 Your STM32 firmware (main.c)
          │
          ▼
-    maze_hal.h          ◄── hardware bridge (sensors, position, commands)
+    maze_hal.h          ◄-- hardware bridge (sensors, position, commands)
          │
          ▼
-    maze_solver.c       ◄── TOP-LEVEL: EXPLORE → RETURN_HOME → FAST_RUN → DONE
+    maze_solver.c       ◄-- TOP-LEVEL: EXPLORE → RETURN_HOME → FAST_RUN → DONE
          │
     ┌────┼────┬─────────┐
     ▼    ▼    ▼         ▼
- robot  graph explore  proof  fastrun   ◄── workers called by the solver
+ robot  graph explore  proof  fastrun   ◄-- workers called by the solver
 ```
 
-- **`maze_solver.c`** is the main brain — it runs the state machine and delegates to the others.
+- **`maze_solver.c`** is the main brain -- it runs the state machine and delegates.
 - **`maze_graph.c`** + **`maze_robot.c`** are pure logic (no hardware dependency).
 - **`maze_explore.c`** + **`maze_proof.c`** + **`maze_fastrun.c`** are the three mission stages.
-- **`maze_hal.h`** is header-only — it reads STM32 globals (`nav`, `head`, `s[]`, `node[][]`) and feeds them into the solver. No `.c` file needed.
+- **`maze_hal.h`** is header-only -- it reads STM32 globals and feeds the solver.
 
 ---
 
@@ -204,8 +175,6 @@ maze_hal.h       ← depends on maze_solver (bridges to hardware)
 ---
 
 ## On the STM32 (Keil / arm-none-eabi)
-
-Add these to your Keil project:
 
 **Sources** (6 `.c` files): all from `src/`
 
@@ -230,12 +199,10 @@ cross = maze_cmd_to_cross(cmd);
 
 ## Quick reference
 
-| Test binary | Tests | What it checks |
-|---|---|---|
-| `build/test_graph.exe` | 6 | Nodes, edges, Dijkstra |
-| `build/test_robot.exe` | 7 | Heading, commands, frontiers |
-| `build/integration_test.exe` | 8 | **Full mission** on 27-node maze |
-| `build/test_maze4.exe` | 8 | **Full mission** on 37-node maze (sample_maze4) |
-| `build/test_hal_compile.exe` | 10 | HAL bridge with stubbed firmware |
+| Command | What it does |
+|---|---|
+| `python scripts/run_maze.py <file.json>` | Test any maze (one command) |
+| `.\scripts\build_all.ps1` | Rebuild + run all unit tests |
+| `gcc --version` | Verify GCC (MSYS2 MinGW) |
 
-**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` for HAL test (must be zero-warning).
+**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` for HAL test (must be zero-warning). Output goes to `build/` (gitignored). `test/_maze_data.h` is auto-generated and gitignored.
