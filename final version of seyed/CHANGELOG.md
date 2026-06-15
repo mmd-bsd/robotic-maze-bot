@@ -41,6 +41,12 @@
 
 ## History (newest first)
 
+### 2026-06-15 — Fast-run command stream in tests + sample_maze4 test
+- **Added fast-run command stream** to both integration tests — after the full mission command log, the test now computes and prints the F/L/R/B commands specifically for the fast-run path using `maze_robot_compute_command()` on `fast_path_nodes[]`.
+- **Created `test/test_maze4.c`** — full-mission test on `sample_maze4.json` (37 nodes, start at (-20,-20), target at (40,-120)).  97 steps, fast path 23 nodes / 12.30s, shortest distance 240 cm.  8 tests pass.
+- **Updated `BUILD_GUIDE.md`** — added Test 5 entry, updated "run all" one-liner, updated reference table, updated sample output with new fast-run command line.
+- Files: `test_maze4.c` (new), `test/integration_test.c`, `BUILD_GUIDE.md`, `CHANGELOG.md`.
+
 ### 2026-06-15 — Build folder clean-up + BUILD_GUIDE.md
 - **Moved all `.exe` files** from `test/` to new `build/` folder (gitignored).
 - **Added `*.exe` to `.gitignore`** — no compiled binaries in the repo.

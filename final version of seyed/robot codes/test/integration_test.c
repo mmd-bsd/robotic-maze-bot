@@ -107,7 +107,7 @@ static int tests_run = 0, tests_failed = 0;
 #define F(m)  do { printf("FAIL: %s\n", m); tests_failed++; } while(0)
 
 int main(void) {
-    printf("=== Integration Test — Full Mission on sample_maze ===\n");
+    printf("=== Integration Test - Full Mission on sample_maze ===\n");
 
     MazeGraph g;
     MazeRobot r;
@@ -204,7 +204,23 @@ int main(void) {
     P();
 
     /* ---- Print full command log ---- */
-    printf("\n  Command stream: %s\n", r.command_log);
+    printf("\n  Command stream (full mission): %s\n", r.command_log);
+
+    /* ---- Print fast-run command stream ---- */
+    if (r.fast_path_length >= 2) {
+        char fast_cmds[512];
+        uint16_t fc = 0;
+        MazeHeading fh = MAZE_HEADING_NONE;
+        for (uint16_t i = 1; i < r.fast_path_length && fc < 510; i++) {
+            const MazeNode* na = maze_graph_get_node(&g, r.fast_path_nodes[i-1]);
+            const MazeNode* nb = maze_graph_get_node(&g, r.fast_path_nodes[i]);
+            if (!na || !nb) break;
+            MazeCommand mc = maze_robot_compute_command(&fh, na->coord, nb->coord, i == 1);
+            if (mc != MAZE_CMD_NONE) fast_cmds[fc++] = (char)mc;
+        }
+        fast_cmds[fc] = '\0';
+        printf("  Fast-run command stream:          %s\n", fast_cmds);
+    }
 
 done:
     printf("\n%d tests, %d failed\n", tests_run, tests_failed);

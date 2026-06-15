@@ -114,7 +114,7 @@ int main(void) {
     P();
 
     /* ---- Test 3: Execute forward to node 1 (0,20) ---- */
-    T("Move to (0,20) — corner node");
+    T("Move to (0,20) - corner node");
     path_c = 1;
     simulate_arrive_at(0, 20, false, true, false);  /* dead end ahead, left branch */
     cmd = maze_hal_tick();
