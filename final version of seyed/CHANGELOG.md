@@ -41,6 +41,76 @@
 
 ## History (newest first)
 
+### 2026-06-15 — Reorganised: C code moved to `robot codes/`
+- **Moved all C solver files** from `simulator/maze solver/maze_solver_c/` to
+  `robot codes/` under `final version of seyed/`.  The C solver is NOT part of
+  the simulator — it's a standalone portable library for the STM32 firmware.
+- **Clean separation:** `simulator/` = Python/Tkinter only.  `robot codes/` = C
+  solver headers, sources, tests, HAL bridge, STATUS.md.
+- Updated all documentation paths: `ARCHITECTURE.md`, `CLAUDE.md`, `CHANGELOG.md`,
+  `STATUS.md`.
+- Build commands unchanged (relative paths within `robot codes/` are still valid).
+
+### 2026-06-15 — HAL bridge + sensor-based branch discovery fix (Step 9)
+- **Created `maze_hal.h`** — STM32 Hardware Abstraction Layer bridging the new C
+  solver to the real robot firmware.  Header-only (`static inline`), follows the
+  existing `stm-sample-code/maze_hal.h` pattern.
+- **API:** `maze_hal_init()` (boot) + `maze_hal_tick()` (per-intersection): reads
+  sensors (head-aware — front bank s[3..6] vs rear bank s[12..15]), gets position
+  from firmware's `node[path_c]`, calls `maze_solver_update_position()` + 
+  `maze_solver_step()`, returns `MazeCommand` → firmware converts to `cross` via
+  `maze_cmd_to_cross()`.
+- **Integration:** gated behind `USE_MAZE_SOLVER` (alongside existing `USE_MAZE_GBF`).
+  Firmware changes are ~10 lines per intersection block; the existing `cross`
+  dispatch handles motor execution.
+- **Direct motor control** fallback (`maze_hal_execute_direct`) for call sites that
+  want to skip `cross` — handles `head` flip and `nav` +180° for U-turns.
+- **BLT debug** (`maze_hal_print_state`, `maze_hal_print_command`) gated by
+  `MAZE_DEBUG_ENABLED`.
+- **Test:** `test_hal_compile.c` — 10 tests, compile+smoke with stubbed firmware
+  globals, 3-node L-maze mission.
+- **Solver fix:** `maze_solver_update_position()` previously only processed sensor
+  data when creating a NEW node — the start node had no unexplored branches, so
+  exploration returned NONE immediately.  Now branches are discovered for ALL nodes
+  via `_discover_branches()`: creates placeholder neighbor nodes at 20 cm offset
+  for each detected open path (left/forward/right; back is skipped).  Heading=NONE
+  defaults to NORTH for the first sensor reading.  `maze_graph_add_edge()` is
+  idempotent (skips duplicates), so repeated sensor readings are safe.
+- Files: `inc/maze_hal.h`, `test/test_hal_compile.c`, `src/maze_solver.c` (updated),
+  `STATUS.md`, `CHANGELOG.md`, `CLAUDE.md`.
+- **31 tests pass, zero warnings.**
+
+### 2026-06-15 — C port of maze solver: all core modules complete (Steps 1-8)
+- **Created a complete C port** of the Python `maze_solver.py` algorithm in
+  `robot codes/`, targeting STM32G031G8Ux (Cortex-M0+,
+  8KB RAM, 64KB flash).  8 modules, 21 tests, zero warnings.
+- **Modules built:**
+  - `maze_types.h` / `maze_config.h` — types matching firmware `nav` (0=N/1=W/
+    2=S/3=E), commands as F/L/R/B chars, fixed-point motion model (×100)
+  - `maze_graph.h/.c` — node/edge CRUD, binary-heap Dijkstra on known map by
+    real distance (cm), integer sqrt
+  - `maze_robot.h/.c` — heading tracking, F/L/R/B command generation via cross-
+    product (ALGORITHMS.md §5), frontier detection, turn-minimizing branch ranking
+  - `maze_explore.h/.c` — P1→P2→P3 priority system, hooks proof module for
+    frontier filtering
+  - `maze_proof.h/.c` — time-based admissible lower bound (LB_time = (dist_known
+    + straight_line) / v_max), frontier pruning, PROVEN/FULL/DISABLED states
+  - `maze_fastrun.h/.c` — trapezoidal velocity profile (`run_time`, `speed_at`),
+    time-optimal path (stop-graph Dijkstra), fast-run plan builder
+  - `maze_solver.h/.c` — top-level EXPLORE→RETURN_HOME→FAST_RUN→DONE FSM
+- **Integration test** runs full mission on 27-node sample maze with incremental
+  discovery: 53 steps, command stream verified, fast path = 8 nodes / 6.50s,
+  proof state = FULL.
+- **Design decisions:** all arrays statically sized (no malloc), time math uses
+  float for now (proof/fast-run called infrequently — can convert to integer
+  later if needed), headings match firmware `nav` encoding.
+- **Remaining:** STM32 HAL bridge (`maze_hal.h`) + cross-compile/integration
+  into `New Start/code/`.
+- Files: `robot codes/` (8 headers + 6 sources + 3 tests
+  + STATUS.md), `CLAUDE.md` (updated with C reference map), `CHANGELOG.md`.
+
+---
+
 ### 2026-06-14 — Yellow stubs: solid lines, 5 cm, one-cycle delay, edge-enter removal
 - Unexplored-branch stubs are now **solid yellow lines of fixed 5 cm length**
   (replaces the previous fixed-size yellow dots). A solid line reads more clearly

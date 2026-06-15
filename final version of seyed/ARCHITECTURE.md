@@ -53,6 +53,11 @@ SEYED/
 │   │   └── mazes/
 │   │       ├── sample_maze.json     27-node demo maze (ported from sim_V12)
 │   │       └── sample_maze2.json    larger demo with a far branch (tests pruning)
+│   ├── robot codes/                  C maze solver port for STM32 firmware
+│   │   ├── inc/                      headers (types, config, modules, HAL)
+│   │   ├── src/                      implementations (graph, robot, FSM, …)
+│   │   ├── test/                     unit + integration tests (31 tests)
+│   │   └── STATUS.md                 module status, build commands, design notes
 │   ├── ARCHITECTURE.md              <-- this file
 │   ├── ALGORITHMS.md                algorithm + command-generation reference
 │   └── CHANGELOG.md                 running worklog/history (keep it updated)

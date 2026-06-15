@@ -8,7 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SEYED** — a line-following maze robot. The robot drives along a 90° grid maze, searches for a target (big black area), proves it found the fastest route, returns to start, then races the fastest path. The fastest path minimises **time** (not distance) under an acceleration model — the robot stops at every turn and accelerates on clear straights.
 
-**Two parts:** (1) Python/Tkinter simulator (active), (2) STM32/C firmware (future).
+**Three parts:**
+1. **Python/Tkinter simulator** (`final version of seyed/simulator/`) — active
+2. **C maze-solving library** (`robot codes/`) — active C port for STM32 firmware
+3. **STM32 firmware** (`New Start/code/Core/`) — runs on STM32G031G8Ux (8KB RAM, 64KB flash)
 
 **Canonical docs** (read these first in any session):
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — layout, rules, conventions, glossary
@@ -53,3 +56,34 @@ while app.phase != "DONE":
 ```
 
 This runs the full mission without `mainloop()` — no display needed. Call `sys.stdout.reconfigure(encoding='utf-8')` before printing unicode.
+
+---
+
+## C code reference map
+
+**Primary C code:** `robot codes/` — the portable C maze solver + STM32 HAL bridge.
+See `robot codes/STATUS.md` for full file listing and build commands.
+
+For the STM32 integration, these are the key reference files (read-only, do not modify):
+
+| What | Path | Status |
+|---|---|---|
+| Working robot firmware | `New Start/code/Core/Src/main.c` | Left-hand-rule explorer, basic string-path, `loop_start` FSM |
+| STM sample with maze_gbf integrated | `New Start/Simulator/py-code/maze solving/maze_gbf/stm-sample-code/main.c` | Shows `USE_MAZE_GBF` integration via `maze_hal.h` |
+| HAL bridge | `New Start/Simulator/py-code/maze solving/maze_gbf/stm-sample-code/maze_hal.h` | Translates `MazeDirection` → firmware `cross`/motion primitives |
+| C maze library (types) | `New Start/Simulator/py-code/maze solving/maze_gbf/inc/maze_types.h` | `MazeNode`, `MazeEdge`, `MazeGraph`, `MazeRobot`, `MazeSensors` |
+| C maze library (graph) | `New Start/Simulator/py-code/maze solving/maze_gbf/inc/maze_graph.h` | BFS shortest-path, neighbor queries on known map |
+| C maze library (robot) | `New Start/Simulator/py-code/maze solving/maze_gbf/inc/maze_robot.h` | Frontier detection, direction calculation, path management |
+| C maze library (main) | `New Start/Simulator/py-code/maze solving/maze_gbf/src/maze_gbf.c` | 3-priority GBF: unexplored→frontier→return home |
+| C test (standalone) | `New Start/Simulator/c-code/C-test-4.c` | Standalone C test with Dijkstra, command generation, full maze |
+| **New C solver** (types) | `robot codes/inc/maze_types.h` | `MazeNode`, `MazeEdge`, `MazeGraph`, `MazeRobot`, `MazeSensors` |
+| **New C solver** (config) | `robot codes/inc/maze_config.h` | Memory limits, motion-model params, compile-time validation |
+| **New C solver** (graph) | `robot codes/inc/maze_graph.h` | Binary-heap Dijkstra by real distance on known map |
+| **New C solver** (robot) | `robot codes/inc/maze_robot.h` | Heading, F/L/R/B commands, frontiers, branch ranking |
+| **New C solver** (explore) | `robot codes/inc/maze_explore.h` | P1→P2→P3 target-agnostic exploration |
+| **New C solver** (proof) | `robot codes/inc/maze_proof.h` | Time-based admissible lower bound, frontier pruning |
+| **New C solver** (fastrun) | `robot codes/inc/maze_fastrun.h` | Trapezoidal profile, stop-graph Dijkstra, time-optimal path |
+| **New C solver** (FSM) | `robot codes/inc/maze_solver.h` | EXPLORE→RETURN_HOME→FAST_RUN→DONE |
+| **New C solver** (HAL) | `robot codes/inc/maze_hal.h` | STM32 HAL bridge — sensors, position, `maze_hal_tick()` |
+
+**Hardware:** STM32G031G8Ux (Cortex-M0+, 8KB RAM, 64KB flash), 18 IR sensors, LSM6DS3TR IMU, GTD servo motors, Bluetooth UART debug.
