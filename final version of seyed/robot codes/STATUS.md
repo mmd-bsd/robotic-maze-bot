@@ -67,7 +67,7 @@ Cross-compile with `arm-none-eabi-gcc`, integrate into `New Start/code/` as a `U
 ## File listing
 
 ```
-maze_solver_c/
+robot codes/
 ├── inc/
 │   ├── maze_types.h       ✅
 │   ├── maze_config.h      ✅

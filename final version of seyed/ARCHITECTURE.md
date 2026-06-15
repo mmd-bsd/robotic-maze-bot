@@ -276,6 +276,7 @@ These are hard-won; keep them in mind before changing the simulator.
   straight branch is never falsely pruned; see `ALGORITHMS.md` §2/§6.
   Open: calibrate `v_max` / `a_max` / per-turn caps from real encoder/IMU data
   (turns are currently modelled as a full stop).
-- **Real-robot firmware** in the final version (port the command stream +
-  exploration/proof logic to STM32; earlier C work lives in
-  `New Start/Simulator/py-code/maze solving/maze_gbf/` and `New Start/code/`).
+- **Real-robot firmware** — the C solver library in `robot codes/` implements the
+  full exploration + proof + fast-run algorithm.  Next step: cross-compile for
+  STM32 and integrate with `New Start/code/Core/Src/main.c` via `USE_MAZE_SOLVER`.
+  The `New Start/` tree holds earlier C prototypes (read-only reference).

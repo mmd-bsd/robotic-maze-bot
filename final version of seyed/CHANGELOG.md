@@ -209,10 +209,14 @@
 
 ## Project state snapshot (update when it drifts)
 
-- **Active area:** `final version of seyed/simulator/` (generator + solver).
-- **Solver phases:** `EXPLORE → FAST_RUN → DONE` (return-home is part of EXPLORE).
+- **Active areas:**
+  - `final version of seyed/simulator/` — Python/Tkinter generator + solver
+  - `final version of seyed/robot codes/` — C solver library + STM32 HAL bridge
+- **Solver phases:** `EXPLORE → RETURN_HOME → FAST_RUN → DONE`.
 - **Fastest route:** minimum-time, accel-aware, on the discovered map; proof is
   time-based and admissible.
+- **C port:** 8 modules, 31 tests, zero warnings.  HAL bridge (`maze_hal.h`)
+  ready for STM32 integration (Step 9 complete, Step 10 pending).
 - **Mazes:** `simulator/mazes/*.json` (`sample_maze.json` auto-loads).
 - **Run:**
   - `python "final version of seyed/simulator/maze solver/maze_solver.py"`
@@ -224,4 +228,6 @@
 - Explore speed is a constant (40 cm/s), not yet a GUI slider — expose if needed.
 - Turns are modelled as a **full stop**; a finite turn speed-cap / turn-time and
   real encoder/IMU calibration of `v_max`/`a_max` are future work.
-- Real-robot STM32 firmware port (command stream + proof) is still future work.
+- **STM32 cross-compile + on-target integration** (Step 10): compile `robot codes/`
+  with `arm-none-eabi-gcc`, link into `New Start/code/` behind `USE_MAZE_SOLVER`,
+  test on hardware.

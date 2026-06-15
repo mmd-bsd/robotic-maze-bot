@@ -1,4 +1,4 @@
-# HAL Bridge Plan — Step 9
+# HAL Bridge Plan — Step 9 ✅ IMPLEMENTED
 
 ## Goal
 
@@ -86,7 +86,7 @@ Same for the head=1 block (~line 1328-1370).
 
 ### File to create
 
-`simulator/maze solver/maze_solver_c/inc/maze_hal.h` — single header (100-150 lines),
+`robot codes/inc/maze_hal.h` — single header (100-150 lines),
 same `static inline` style as the existing `maze_hal.h`.
 
 ### Tests
