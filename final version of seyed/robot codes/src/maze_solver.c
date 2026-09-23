@@ -15,8 +15,9 @@
 
 /** Placeholder distance (cm) used when creating a neighbor node for a
  *  sensor-detected branch.  The real distance is filled in when the robot
- *  physically arrives.  20 cm is the standard grid spacing. */
-#define PLACEHOLDER_DIST_CM  20
+ *  physically arrives — see the note on the "longer than one cell" case at
+ *  MAZE_CELL_CM in inc/maze_config.h. */
+#define PLACEHOLDER_DIST_CM  MAZE_CELL_CM
 
 /**
  * @brief  Discover a single branch direction and create a placeholder node

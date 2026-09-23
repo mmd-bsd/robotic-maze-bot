@@ -54,9 +54,10 @@ SEYED/
 │   │       ├── sample_maze.json     27-node demo maze (ported from sim_V12)
 │   │       └── sample_maze2.json    larger demo with a far branch (tests pruning)
 │   ├── robot codes/                  C maze solver port for STM32 firmware
-│   │   ├── inc/                      headers (types, config, modules, HAL)
-│   │   ├── src/                      implementations (graph, robot, FSM, …)
+│   │   ├── inc/                      headers (types, config, modules, HAL, brain)
+│   │   ├── src/                      implementations (graph, robot, FSM, brain, …)
 │   │   ├── test/                     unit + integration tests (31 tests)
+│   │   ├── scripts/                  build_all.ps1, run_maze.py, run_brain.py, …
 │   │   └── STATUS.md                 module status, build commands, design notes
 │   ├── ARCHITECTURE.md              <-- this file
 │   ├── ALGORITHMS.md                algorithm + command-generation reference
