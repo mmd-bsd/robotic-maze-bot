@@ -99,6 +99,11 @@ venv/
 # =====================================================================
 # PCB / electronic CAD design files (Altium, etc.)
 # =====================================================================
+# Altium also writes an HTML export next to a .PcbDoc ("MazeLine.PcbDoc.htm").
+# That is an export of an ignored file, not source -- ignore it with its parent.
+*.PcbDoc.htm
+*.SchDoc.htm
+*.PrjPcb.htm
 *.PcbDoc
 *.PcbLib
 *.SchDoc

@@ -104,6 +104,27 @@
 
 ## History (newest first)
 
+### 2026-09-23 — Housekeeping: the field reference images moved, scratch drafts removed
+
+No behaviour change. Three cleanups so the branch matches what is on disk:
+
+- **`robot and field data/` is gone** — its two images now live in
+  `specifiction/` (`field.png`, `sens num order.jpg`) and, for the parent tree's
+  copy, under `New Start/field/` and `New Start/robot sensore/`. The directory
+  was removed from disk during the session; this commit records the deletion in
+  history rather than leaving a phantom "deleted but unstaged" entry.
+  **`field.png` is load-bearing** — it is the source `field_to_maze.py` reads to
+  generate `simulator/mazes/real_field.json`, the real maze every result in this
+  file is measured on. The one doc reference to the old path (further down this
+  file, under the `real_field.json` entry) is updated.
+- **`.newfn.c`, `.newstage1.c`, `.newstage2.c` deleted.** They were working
+  notes for the `main.c` rewrite; their content is verbatim in `main.c` (checked
+  comment-by-comment), so they were pure duplication. Recoverable from git
+  history if ever wanted.
+- Nothing in `robot codes/` or `firmware/` changed.
+
+---
+
 ### 2026-09-23 — Retire the legacy explorer, wire in the brain, free the RAM
 
 **The firmware now runs the decision core.** The legacy left-hand-rule explorer
@@ -958,7 +979,9 @@ in `SENSORS.md` §3 for when it matters.
 
 #### 2. The real field runs in both solvers (`simulator/mazes/real_field.json`, new)
 
-`robot and field data/field.png` is the actual test maze. Reading it out:
+`specifiction/field.png` is the actual test maze (it moved out of
+`robot and field data/` on 2026-09-23; see the entry at the top of this file).
+Reading it out:
 
 - It is a **line maze** — the black lines are the *tracks*, not walls. Proof: the
   target disc (radius ≈ 20 px) is centred on a grid **intersection**, not a cell
