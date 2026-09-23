@@ -99,10 +99,269 @@
   missing from both until 2026-09-23.
 - Keil's output dir in this project is called **`Source`**, not `Objects`.
 - Bash arrays (`"${arr[@]}"`), never space-joined strings, for paths in this repo.
+- **An input derived from the same expression as another input carries no
+  information.** `main.c` builds `in.front` from `(s[3]||s[4]||s[5]||s[6])` — the
+  same centre term it uses for `left_poss`/`right_poss` — so `front` is 1 by
+  construction at every lateral stop and a corner is indistinguishable from a
+  T-junction. When you add a field to a report struct, check it is not already
+  implied by the fields beside it.
+- **Test inputs must be producible by the thing under test.** `brain_host.c`'s
+  inputs come from the maze's *true topology*, so it can emit `(F=0, L=1)` which
+  the hardware cannot, and never emits the hardware's corner state. Its 7/7 passes
+  on an input the robot cannot generate — a green host suite is not evidence about
+  the robot. Replay what the hardware actually reported before believing a model.
+- **MinGW does not honour `_IOLBF` on a pipe.** A child that writes to a pipe must
+  `fflush` explicitly or the parent deadlocks waiting for an answer that is
+  sitting in the C library's buffer — it is a deadlock, not a slow run.
+- **Windows `CreateProcess` will not resolve a relative path with forward
+  slashes.** `Popen(['build/x.exe'])` raises `WinError 2`; pass an abspath.
+- **A checker that only ever passes proves nothing — assert the negative case too.**
+  The replay fixtures come in pairs (one agreeing, one with a single field
+  altered) precisely so `build_all.ps1` asserts 0 mismatches *and* exactly 1. The
+  vacuously-passing RAM check above is this repo's own precedent.
+- **If you build the input from the expected behaviour, the test is an echo.** The
+  `capture_agree.txt` masks were derived from the firmware's own stop test
+  (`centre live AND >=1 lateral`), so replaying it and reporting "in.front is live
+  at 5 of 5 junctions" restated the C source instead of measuring the robot — and
+  it was briefly written up as hardware evidence before being caught. Same class
+  as the earlier `front_audit()` that treated the *driven* edge as proof of a
+  forward exit. **Before citing a test result, ask what the input was made from.**
+  Propagating this into `ARCHITECTURE.md`, `STATUS.md` and this file cost more
+  than the original error.
+- **`pyserial` is the repo's only third-party dependency** (against the
+  stdlib-preference rule), guarded by `try`/`except` with a clear `pip install`
+  message and needed only for `bt_monitor.py`'s live serial path.
+- **An alarm that fires on every run is not an alarm.** Every real capture
+  contains the firmware's `Hi ,mmdi` boot banner (`main.c:1112`); counting it as
+  `UNPARSED` taught the operator to ignore the counter that reveals a dropped
+  junction. Split benign chatter from telemetry-shaped damage, and make sure both
+  tools that report the counter share one definition of it.
+- **`root.update()` in a headless Tk test never returns on a self-rescheduling
+  `after` callback** (`update()` drains due timers without limit, and `_tick`
+  re-arms itself). Use `root.update_idletasks()`. The GUI analogue of the
+  bounded-loop rule in the headless-simulator pattern.
 
 ---
 
 ## History (newest first)
+
+### 2026-09-23 — "Corner" pinned down in the glossaries, and proof the two stop rows are exhaustive
+
+**What changed.** Docs only — no code, no firmware. `Corner` is now a glossary
+entry in both the root `CLAUDE.md` and `ARCHITECTURE.md` §6.
+
+**Why.** The open `in.front` question was being discussed on both sides without a
+shared definition, which is a bad way to argue about an unrepresentable state.
+The agreed meaning: **a corner is a node where the lane turns 90° *and there is no
+lane straight on*** — exactly one lateral exit, `back`, and no `front`; i.e.
+`(F=0, L=1, R=0)` or `(F=0, L=0, R=1)`. A node with a straight-through lane is a
+T or a crossing, not a corner, and `(F=0, L=0, R=0)` is a dead end. This is the
+state rule 9 of `ARCHITECTURE.md` §5 says the hardware cannot report.
+
+**Also recorded** (in the `in.front` entry below): `centre_dark` at `main.c:1361`
+is **exactly `!front`** — same four sensors, inverted. That is what makes the two
+rows of that entry's table *exhaustive* rather than merely observed: the
+persistence stop requires `centre_dark` (so `front = 0`, so `L = R = 0`) and a
+node stop requires a lateral (so `front = 1`). The two stop paths partition the
+state space; a third reading cannot occur.
+
+**Lesson.** When a defect claim hinges on a geometric word, write the word down —
+"corner", "junction", "branch" were all being used loosely, and the whole argument
+is about which of those shapes the sensors can tell apart.
+
+---
+
+### 2026-09-23 — Live capture + virtual brain: the bring-up instrument, and an open question about `in.front`
+
+**Two things landed together: the tool that makes on-target bring-up observable, and
+the first question it raised.**
+
+#### The finding
+
+**`in.front` is very likely degenerate at a node — but the decisive measurement
+has not been made, and this entry originally overclaimed it. Read the correction
+first.**
+
+The source-level fact, which is solid and needs no hardware:
+
+- `main.c:1338-1339` — `left_poss = s[2] && (s[3]||s[4]||s[5]||s[6])`,
+  `right_poss = s[7] && (s[3]||s[4]||s[5]||s[6])`
+- `main.c:932` — `in.front = (s[3]||s[4]||s[5]||s[6])` ← **the same centre term**
+- `main.c:1377` — `if ((at_node && (left_poss||right_poss)) || (centre_dark && head_delay >= 50))`
+- `main.c:1361-1369` — `centre_dark = (s[3]==0 && s[4]==0 && s[5]==0 && s[6]==0)` (all
+  WHITE), and `head_delay` is **reset whenever `at_node` is true**
+
+Read the first two together and they collapse to `left_poss = s[2] && front` and
+`right_poss = s[7] && front`. So **`L=1 ⟹ F=1`, identically** — `front = 0` forces
+both laterals to 0, and the input `(F=0, L=1)`, **which is exactly what a corner
+is, is unreachable on this hardware** — no matter what the sensors see.
+
+Then the stop test closes it: `head_delay` is force-reset at a node, so the
+persistence clause can never fire at a node, so a node stop must come from
+`at_node && (left_poss||right_poss)` — which forces `front` = 1. A corner
+therefore reaches the brain as exactly one of:
+
+| corner stop is… | brain gets | meaning it carries |
+|---|---|---|
+| `at_node` (mask bits 0,9 set) | `F=1, L=1, R=0` | corner ≡ T-junction → P1 answers `'F'` |
+| persistence (bits 0,9 clear) | `F=0, L=0, R=0` | **corner ≡ dead end** → brain answers `'B'` |
+
+Both are wrong; the truth is `(F=0, L=1, R=0)`, which cannot be expressed.
+
+And there is no third row, from the same source: `centre_dark` is
+`s[3]==0 && s[4]==0 && s[5]==0 && s[6]==0`, which is **exactly `!front`** — the
+same four sensors, inverted. So the persistence stop (which needs `centre_dark`)
+*always* carries `front = 0`, and a node stop (which needs a lateral) *always*
+carries `front = 1`; the two stop paths *partition* the possibilities. Every
+corner stop is one of those two lines, with nothing in between.
+
+**MEASURED on the shipped code, 2026-09-23** — `build/brain_oracle.exe`, which is
+the same `brain.c` the robot runs, one junction per run:
+
+```
+1 0 1 1 0 20   ->  S F ...     L=1 R=0 F=1  ->  brain answers 'F'  (straight)
+1 0 0 1 0 20   ->  S L ...     L=1 R=0 F=0  ->  brain answers 'L'  (turn)
+```
+
+So the top row of the table is not an inference about P1's preference — it is
+what the shipped decision core does with the input the firmware actually builds.
+The corner move hinges on that single bit and nothing else.
+
+**THE TEST, and it is one hex field.** At a corner whose lane does not continue
+straight, read bits 0 and 9 of field 7 of the `J` line (the raw front mask):
+- both set → the corner stopped at a node → reported as a T-junction.
+- bits 0/9 clear → the corner stopped via persistence → reported as a **dead end**
+  (the worse symptom: the brain reverses).
+
+`nav` cannot audit it (`main.c:1458`, `1884-1885` — it only moves on a commanded
+turn), and the `B` lines are the same dead reckoning. It needs the mask.
+
+#### CORRECTION (same day): the "5 of 5" evidence was circular — retracted
+
+This entry originally claimed the defect was **measured**: that
+`bt_monitor.py --replay test/fixtures/capture_agree.txt` reports
+`in.front == (in.left or in.right)` at **5 of 5** junctions. **That is not
+evidence and has been removed.** The fixture is **synthetic**, and its own header
+says the masks are "a state the hardware can actually reach — the firmware reports
+at `(centre live AND >=1 lateral)` or `(centre dark AND no lateral)`". The
+reachable set was **defined using the firmware's own stop condition**, so
+replaying it and observing that the centre group is always live at a junction
+**restates the identity above instead of testing it**. A fixture cannot test the
+question it was constructed to assume.
+
+This is the tautology trap already recorded in `ALGORITHMS.md`/the plan ("a
+checker that only ever passes proves nothing") and it was walked into a second
+time — the first was an earlier `front_audit()` that treated the driven edge as
+evidence of a forward exit. **The pattern to watch for: when the expected
+behaviour is used to build the input, the test is an echo.** The replay fixtures
+are still exactly right for what they *do* prove (that the detector detects — one
+fixture agrees, one mismatch is caught), just not for this.
+
+**`brain_host.c`'s 7/7 does not transfer to the robot either.** It derives
+front/left/right from `true_neighbor(...)` — the maze's *true topology* — so it
+**can** produce `(F=0, L=1)`, which the hardware cannot, and it never produces
+the hardware's corner state. It passes because it is fed an input the robot
+cannot generate.
+
+#### What `s[3..6]` can and cannot see
+
+Worth stating plainly, because the sensors *are* doing something real: `s[3..6]`
+measure black under the front-centre row, and at a corner that black is genuine —
+it is the junction the robot is standing on. **A thin lane and the junction blob
+both read black**, so four centre sensors at a single instant cannot separate
+"the lane continues" from "I am on a blob". Separating them needs evidence over
+*distance* — the persistence trick `head_delay` already uses, mirrored.
+
+**The firmware was deliberately NOT changed.** The fix is one expression in
+`brain_report()`, but there is no sensor arrangement on the current board that
+measures "forward open" independently at a corner — so this is a design decision
+for the user, not a unilateral patch. Settle it on the robot before trusting P1.
+
+#### The tool
+
+- **`test/brain_oracle.c` (new)** — `brain.c` as a stdin/stdout filter: one
+  `BrainIn` per line in, one move out, plus the two plan strings on `BRAIN_DONE`.
+  It needs **no maze header** (the brain discovers its map from `dist_cm` alone),
+  so unlike `brain_host.c` it builds **and runs** in the standard suite — which
+  makes it the one place `brain.c` is actually *executed* there. `--selftest`
+  checks a known 5-junction sequence, `--probe` prints it unchecked.
+- **`scripts/bt_monitor.py` (new, ~900 lines)** — opens the COM port, draws the
+  brain's believed map and position as data arrives in **the brain's own frame**
+  (no pose guess), and feeds each junction's *actual* `BrainIn` to
+  `brain_oracle.exe` to check the robot's decision against **the real `brain.c`** —
+  not a Python re-implementation, so a disagreement is a fact about the robot or
+  the wire. Records verbatim `.txt` + `.csv` + `.json` into `build/bt_captures/`,
+  per-line flushed. Modes: `--replay`, `--headless`, `--demo`, `--no-oracle`.
+- **`scripts/parse_telemetry.py`** — refactored: `parse()` split into `parse_line()`
+  + `iter_parsed()` so the wire format has exactly ONE definition shared by both
+  tools, which is what stops them drifting apart. The refactor itself is
+  behaviour-neutral (line for line, same fields), **except for one deliberate
+  change** described next.
+- **`BAD` split from `BANNER` — the unparsed counter now means the same thing in
+  both tools.** The firmware prints `Hi ,mmdi` as a Bluetooth boot banner on
+  **every** run (`main.c:1112`). `parse_telemetry.py` counted that as `UNPARSED`
+  and printed *"wrong firmware build, or a truncated capture?"* — on every real
+  capture, forever, which trains the operator to ignore the one counter that
+  exists to reveal a **dropped junction**. Now: a line that is *telemetry-shaped*
+  (`S,`/`J,`/`B,`/`Z,`) and fails to parse is `BAD` — the alarm; anything else is
+  `BANNER` — counted and ignored. `bt_monitor.py` no longer re-derives this split
+  itself but reads `parse_line`'s verdict, so the two cannot drift. Neither kind
+  is ever silently dropped. `parse()` returns a 6th element (`banner`); its only
+  caller is `main()`, updated with it.
+- **`test/fixtures/`** — `capture_agree.txt` / `capture_disagree.txt`, generated
+  from the oracle so agreement holds *by construction*; the second differs by
+  **exactly one field** (junction 3's `ch` → `'B'`).
+- **`scripts/build_all.ps1`** — a 5th target (`brain_oracle`, `-Werror`) plus its
+  `--selftest` and **both** replay checks asserted (0 mismatches on agree; exactly
+  1 at the named junction on disagree). **This is the piece that proves the
+  detector detects** — a checker that only ever passes proves nothing, and the
+  vacuously-passing RAM check below is this repo's own precedent.
+  It also now **checks exit codes on the run phase and exits 1 itself**; before
+  this it printed the tests' output and reported DONE regardless, so a failing
+  test was visible in the scroll but did not fail the build.
+
+**Ran:** 5 builds clean under `-Werror`, 21 unit tests + 1 oracle self-test + 2
+replay checks, 0 failed, 0 warnings.
+
+**Dependency:** `pyserial` — the repo's **first third-party dependency**, imported
+guardedly, needed only for the live serial path (`--replay`/`--demo`/`--headless`
+run without it). Contained to one file, against rule 6's stdlib preference.
+
+#### Gotchas worth keeping
+
+- **MinGW does not honour `setvbuf(stdout, NULL, _IOLBF, 0)` on a pipe.** Without
+  an explicit `fflush`, every oracle response sits in the C library's buffer until
+  the process exits — invisible when a shell pipes a whole file in, and a
+  **deadlock** when a host reads one answer at a time. Cost an afternoon; it is a
+  deadlock, not a slow run.
+- **Windows `CreateProcess` does not resolve relative paths containing forward
+  slashes** — `Popen(['build/brain_oracle.exe'])` raises `FileNotFoundError
+  [WinError 2]`. Pass an abspath.
+- **`brain.c`'s state is static: one process is one mission.** A second replay
+  needs a fresh process or an `INIT`.
+- **A dropped `J` line desynchronises the oracle**, and then *every* later junction
+  reports a false mismatch. The unparsed/dropped count must be surfaced
+  prominently and the run labelled suspect, or the operator chases ghosts.
+- **The oracle cannot prove the brain is right, only that it is consistent.** It is
+  the same code, so it agrees by construction *unless the wire lied*. Whether the
+  brain's *model* matches the robot stays a physical question.
+- **`root.update()` in a headless Tk test loops forever on a self-rescheduling
+  `after` callback.** `_tick` ends with `root.after(30, self._tick)`, and
+  `update()` drains due timer callbacks without limit — driving `_tick` manually
+  *and* calling `update()` re-enters it indefinitely (it ate a 120 s timeout with
+  no output). Use **`root.update_idletasks()`**, which does not run timers. The app
+  itself is fine; `mainloop()` handles this correctly. This is the GUI analogue of
+  the bounded-loop rule already in the headless-simulator pattern.
+
+**Files:** `robot codes/test/brain_oracle.c` (new),
+`robot codes/scripts/bt_monitor.py` (new),
+`robot codes/test/fixtures/{capture_agree,capture_disagree}.txt` (new),
+`robot codes/scripts/parse_telemetry.py`,
+`robot codes/scripts/build_all.ps1`, `robot codes/BUILD_GUIDE.md`,
+`robot codes/STATUS.md`, `ARCHITECTURE.md` (§5 items 8-11, new *Brain / firmware
+seam* subsection), root `CLAUDE.md`. **`firmware/Core/Src/main.c` untouched.**
+
+---
 
 ### 2026-09-23 — Housekeeping: the field reference images moved, scratch drafts removed
 
@@ -1345,25 +1604,33 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 
 - **Active areas:**
   - `final version of seyed/simulator/` — Python/Tkinter generator + solver
-  - `final version of seyed/robot codes/` — C solver library + STM32 HAL bridge
+  - `final version of seyed/robot codes/` — C solver library (no HAL; the brain
+    is the seam)
   - `final version of seyed/firmware/` — **the STM32 firmware** (copy of `New Start/code/t2/`);
     Keil project at `firmware/MDK-ARM/Source.uvprojx`, solver sources referenced in
     place from `robot codes/`
 - **Solver phases:** `EXPLORE → RETURN_HOME → FAST_RUN → DONE`.
 - **Fastest route:** minimum-time, accel-aware, on the discovered map; proof is
   time-based and admissible.
-- **C port:** 8 modules, 31 tests, zero warnings.  HAL bridge (`maze_hal.h`)
-  reconciled against the real firmware.  Integration is **M0-complete but
-  RAM-blocked**: the solver does not fit until the legacy path/map arrays are
-  retired (see the 2026-09-23 entry).
-- **Decision core (`brain.c`) — host-validated.** `brain.h`/`brain.c` expose the
-  solver as a pure decision function over junction reports (`BrainIn`) → one move
-  (`'F'/'L'/'R'/'B'`), then two command strings when done.  The robot owns
-  everything physical; the brain never reads a sensor, motor, encoder or compass.
-  **5/5 checks on all five mazes**, including `real_field`, where the brain's
-  fast-path time equals the time-optimal cost of the full maze it was never
-  allowed to see.  Test: `python scripts/run_brain.py ../simulator/mazes/<f>.json`.
-  Not yet wired into the firmware.
+- **C port:** 7 modules, **21 unit tests + 1 oracle self-test + 2 replay checks,
+  zero warnings** (`.\scripts\build_all.ps1`, exits 1 on failure).
+  `maze_hal.h` is **deleted** — there is no HAL and no legacy explorer. The
+  brain-driven firmware **fits**: 40820/65536 flash, 6832/8192 RAM (1360 B free).
+- **Decision core (`brain.c`) — wired into the firmware, host-validated.**
+  `brain.h`/`brain.c` expose the solver as a pure decision function over junction
+  reports (`BrainIn`) → one move (`'F'/'L'/'R'/'B'`), then two command strings when
+  done. The robot owns everything physical; the brain never reads a sensor, motor,
+  encoder or compass. `main.c` calls `brain_step()`, and `replay_dispatch()` is the
+  single executor for both plans. **7/7 checks on 5 mazes** via
+  `python scripts/run_brain.py ../simulator/mazes/<f>.json`, including
+  `real_field`, where the brain's fast-path time equals the time-optimal cost of
+  the full maze it was never allowed to see.
+  **But those checks use a maze-topology model, so they do not transfer to the
+  robot** — see the `in.front` finding above.
+- **Bring-up instrument:** `robot codes/scripts/bt_monitor.py` (live capture +
+  virtual-brain decision check, needs `pip install pyserial`) and
+  `python scripts/parse_telemetry.py <capture.txt>` (offline measurements).
+  `test/brain_oracle.c` is the virtual brain — the real `brain.c`, linked and run.
 - **Firmware build:** `bash scripts/build_firmware.sh` (no Keil needed);
   RAM check: `bash scripts/measure_solver_ram.sh`.
 - **Mazes:** `simulator/mazes/*.json` (`sample_maze.json` auto-loads).
@@ -1377,27 +1644,45 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 - Explore speed is a constant (40 cm/s), not yet a GUI slider — expose if needed.
 - Turns are modelled as a **full stop**; a finite turn speed-cap / turn-time and
   real encoder/IMU calibration of `v_max`/`a_max` are future work.
+- **⚠ `in.front` is PROBABLY degenerate at a node — OPEN, one capture settles it
+  (2026-09-23).** `main.c:932` builds `in.front` from `(s[3]||s[4]||s[5]||s[6])`,
+  the *same* centre term `main.c:1338-1339` uses for `left_poss`/`right_poss`.
+  Because `head_delay` is force-reset at a node (`main.c:1361-1369`), the
+  persistence clause cannot fire there, so **every stop at a node reports
+  `front` = 1** — a corner cannot be told from a T-junction. That is source-level
+  and solid. What is **not** established is whether a **corner stop is an
+  `at_node` stop**; if it is, P1's straight-first preference drives a corner as if
+  it were a T. **Test:** at a corner with no straight-through lane, read bits 0
+  and 9 of field 7 (the raw mask) of the `J` line — `0x201` set confirms it,
+  clear means no defect. An earlier version of this entry claimed it was
+  "measured at 5 of 5 junctions"; **that was circular and is retracted** (the
+  fixture's masks were built from the firmware's own stop condition). See
+  `robot codes/STATUS.md` §"Bring-up on the robot" item 0.
 - **STM32 on-target integration**: the build/link step is DONE (ARMCC 5, from the
-  command line). What remains is (a) retiring the legacy path/map arrays to free
-  the **1808 B** the link is short by (current figure from
-  `measure_solver_ram.sh`), (b) wiring `brain_step()` into `main.c`'s junction
-  handler, then (c) encoder calibration + on-hardware testing.
+  command line), `brain_step()` is wired into `main.c`'s junction handler, the
+  legacy path/map arrays are retired, and the RAM blocker is gone (1360 B free,
+  `measure_solver_ram.sh` reports FITS). What remains is **on-target bring-up
+  only**: encoder calibration + on-hardware testing.
 - **Bring-up mode chosen:** the brain runs in firmware and prints each decision
-  over Bluetooth, waits ~5 s, then executes. Supervised, one node at a time —
-  see `New Start/` for the firmware's existing Bluetooth UART debug path.
-- **Two firmware questions, both now decided — the M1 capture only checks the
-  second** (see the 2026-09-23 "Reading the real junction logic" entry, and
-  `inc/brain.h` for the integration notes):
-  1. ~~Is the junction gate `s[0] && s[9]` an AND or an OR?~~ **DECIDED
-     (2026-09-23): inherit it AS WRITTEN — `&&`, per main.c:1372/1378.**
-  2. ~~`front` = `centre-on-line` may be wrong at a corner.~~ **DECIDED
-     (2026-09-23): use it — `in.front = s[3]||s[4]||s[5]||s[6]`.** The residual
-     corner doubt is settled by measurement, not geometry: one M1 capture at a
-     known corner reads the raw mask and confirms or refutes it. If it lies, the
-     fix is that one expression in the integration, not in the brain.
-  The `J` telemetry lines carry the raw `front`/`rear` sensor masks as hex plus
-  `L`,`R`,`cross`, so one capture turns the remaining doubt into a measurement.
+  over Bluetooth, waits ~5 s, then executes. Supervised, one node at a time.
+  **Watch it with `robot codes/scripts/bt_monitor.py`** — it checks each decision
+  against the real `brain.c` live, so a bad call is caught at the junction rather
+  than in a report afterwards.
+- **Two firmware questions, both decided on 2026-09-23 — one of them is now
+  reopened by measurement** (see the 2026-09-23 "Reading the real junction logic"
+  entry, and `inc/brain.h` for the integration notes):
+  1. ~~Is the junction gate `s[0] && s[9]` an AND or an OR?~~ **DECIDED:
+     inherit it AS WRITTEN — `&&`, per main.c:1372/1378.** (The later
+     correction stands: it is a *position* gate, not a 4-way test.)
+  2. `front` = `centre-on-line`. **Was decided "use it"; that decision is
+     UNSAFE.** The instrument built to settle it on-target answered the question
+     from the source and the wire first, and the answer is that the expression is
+     degenerate — see the first bullet above. The `J` lines' raw `front`/`rear`
+     masks are what turned the doubt into a measurement.
 - **The brain has never run on hardware.** Everything above is host-validated
   against a *model* of the firmware's junction detector (`brain_host.c` mirrors
-  the front-bank block at `main.c:1366-1407`). The first on-robot run is what tests
-  that model.
+  the front-bank block at `main.c:1366-1407`) — and `brain_host.c` **derives its
+  inputs from the maze's true topology**, so it can produce `(F=0, L=1)` which the
+  hardware cannot, and never produces the hardware's corner state. Its 7/7 passes
+  on an input the robot cannot generate. Only a real capture (`bt_monitor.py`,
+  `parse_telemetry.py`) tests this.

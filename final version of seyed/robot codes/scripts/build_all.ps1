@@ -52,15 +52,25 @@ $builds += @{
 }
 
 # ---- brain.c (compile-only, -Werror) ----
-# The decision core's warning check.  It cannot be LINKED here -- brain_host,
-# its only test, needs a generated _maze_data.h and is driven by
-# scripts/run_brain.py instead -- but the object compile needs no maze data and
-# is what keeps brain.c under the same zero-warning rule as the rest of the
-# library.  Compile-only, so it is not run below.
+# The decision core's zero-warning check.  brain_host, its maze-driven test,
+# needs a generated _maze_data.h and is driven by scripts/run_brain.py instead,
+# so the object compile is what keeps brain.c under the same rule as the rest of
+# the library.  brain_oracle (below) is the target that actually LINKS and RUNS
+# it, and needs no maze data at all.
 $name = "brain"
 $builds += @{
     Name = $name
     Cmd  = "gcc $FLAGS_WERROR -I $INC -c $SRC/brain.c -o $OUT/brain.o"
+}
+
+# ---- brain_oracle (the virtual brain, linked and run) ----
+# brain.c as a stdin/stdout filter: BrainIn in, one move out.  bt_monitor.py
+# drives it over a pipe to check the robot's decisions against the real brain.
+# No maze header, so unlike brain_host it builds and runs right here.
+$name = "brain_oracle"
+$builds += @{
+    Name = $name
+    Cmd  = "gcc $FLAGS_WERROR -I $INC $SRC/maze_graph.c $SRC/maze_robot.c $SRC/maze_explore.c $SRC/maze_proof.c $SRC/maze_fastrun.c $SRC/maze_solver.c $SRC/brain.c $TEST/brain_oracle.c -lm -o $OUT/$name.exe"
 }
 
 # -- BUILD --
@@ -85,20 +95,74 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host ""
 
 # -- RUN --
-# brain is compile-only, so it is not listed (its test needs a generated maze
-# header -- see scripts/run_brain.py).
+# brain.o is compile-only, so it is not listed (its maze-driven test needs a
+# generated header -- see scripts/run_brain.py).  brain_oracle needs no maze and
+# runs right here.
 $runs = @("test_graph","test_robot","integration_test")
 foreach ($name in $runs) {
     $exe = "$OUT/$name.exe"
     if (Test-Path $exe) {
         Write-Host "[RUN] $name" -ForegroundColor Yellow
         & $exe
+        if ($LASTEXITCODE -ne 0) { $failed++ }
         Write-Host ""
     } else {
         Write-Host "[SKIP] $name (not built)" -ForegroundColor DarkYellow
     }
 }
 
+# ---- brain_oracle --selftest ----
+# The only place brain.c is EXECUTED in this suite.  Five junctions of a 2x2
+# square; on any mismatch the process exits 1, so this cannot pass vacuously.
+$exe = "$OUT/brain_oracle.exe"
+if (Test-Path $exe) {
+    Write-Host "[RUN] brain_oracle --selftest" -ForegroundColor Yellow
+    & $exe --selftest
+    if ($LASTEXITCODE -ne 0) { $failed++ }
+    Write-Host ""
+} else {
+    Write-Host "[SKIP] brain_oracle (not built)" -ForegroundColor DarkYellow
+}
+
+# ---- bt_monitor.py replay checks ----
+# THE DETECTOR DETECTS.  A checker that only ever passes proves nothing (the
+# vacuously-passing RAM check in CHANGELOG.md is this repo's own precedent), so
+# both directions are asserted: the agreeing fixture must produce ZERO
+# mismatches, the disagreeing one must produce EXACTLY ONE, and exit 1.
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Host "[SKIP] bt_monitor replay (python not on PATH)" -ForegroundColor DarkYellow
+} else {
+    $replays = @(
+        @{ File = "capture_agree.txt";    Want = 0; What = "0 decision mismatches" },
+        @{ File = "capture_disagree.txt"; Want = 1; What = "exactly 1 decision mismatch" }
+    )
+    foreach ($r in $replays) {
+        $fix = "$TEST/fixtures/$($r.File)"
+        if (-not (Test-Path $fix)) {
+            Write-Host "[SKIP] bt_monitor $($r.File) (fixture missing)" -ForegroundColor DarkYellow
+            continue
+        }
+        Write-Host "[RUN] bt_monitor --replay $($r.File)" -ForegroundColor Yellow
+        $out = & python "scripts/bt_monitor.py" --replay $fix --headless 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        Write-Host $out.TrimEnd()
+        if ($code -ne $r.Want) {
+            Write-Host "  FAILED: expected $($r.What), exit=$code (want $($r.Want))" -ForegroundColor Red
+            $failed++
+        } else {
+            Write-Host "  OK ($($r.What), exit=$code)" -ForegroundColor Green
+        }
+        Write-Host ""
+    }
+}
+
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "  DONE" -ForegroundColor Cyan
+if ($failed -eq 0) {
+    Write-Host "  DONE -- all builds and runs passed" -ForegroundColor Green
+    Write-Host "  (21 unit tests + 1 oracle selftest + 2 replay checks)" -ForegroundColor Green
+} else {
+    Write-Host "  FAILED: $failed build(s)/run(s)" -ForegroundColor Red
+}
 Write-Host "==============================================" -ForegroundColor Cyan
+
+if ($failed -ne 0) { exit 1 }

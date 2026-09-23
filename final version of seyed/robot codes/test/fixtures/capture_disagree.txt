@@ -1,0 +1,33 @@
+# Synthetic telemetry capture for testing bt_monitor.py -- NOT a real run.
+#
+# Generated 2026-09-23 by feeding build/brain_oracle.exe this sequence and
+# recording the moves it returned, so every `ch` here equals the oracle's own
+# decision BY CONSTRUCTION.  That is the point: this fixture can only fail if
+# the tool is broken, which is what makes it a false-positive test.
+#
+# Every sensor mask is a state the hardware can actually reach -- the firmware
+# reports at `(centre live AND >=1 lateral)` or `(centre dark AND no lateral)`
+# and nowhere else (main.c:1377-1378).  The stream therefore contains no input
+# the robot cannot produce, unlike brain_host.c, which derives `front` from the
+# maze's topology and so feeds the brain states the hardware never sends.
+#
+# If brain.c's decisions are deliberately changed, REGENERATE this file (see
+# BUILD_GUIDE.md) rather than editing it by hand.
+#
+#
+# This file differs from capture_agree.txt in exactly ONE field: junction 3's
+# `ch`, changed from the oracle's answer to 'B'.  bt_monitor must report exactly
+# one DECISION MISMATCH, at junction 3, and exit 1.
+#
+Hi ,mmdi
+J,1200,F,0,0,29,25,0F8,00,0,1,0,0,0,0
+B,1200,0,0,0,0,F
+J,1320,F,0,0,128,45,07C,00,1,0,0,0,20,1
+B,1320,1,0,20,0,F
+J,1440,B,0,0,228,65,0FC,00,1,1,0,1,40,5
+B,1440,5,0,60,0,F
+J,1560,B,0,0,130,45,000,00,0,0,4,0,20,7
+B,1560,7,0,80,0,B
+J,1680,L,180,0,223,65,0FC,00,1,1,1,0,40,4
+B,1680,4,0,40,0,L
+Z,1900,1

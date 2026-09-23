@@ -59,17 +59,84 @@ Example output:
 .\scripts\build_all.ps1
 ```
 
-This builds 4 targets and runs 3 of them (21 tests total):
+This builds 5 targets and runs them all: **21 unit tests + 1 oracle self-test +
+2 replay checks**, and **it exits 1 if anything failed.**
+
 - `test_graph.exe` (6 tests) -- nodes, edges, Dijkstra
 - `test_robot.exe` (7 tests) -- heading, commands, frontiers
 - `integration_test.exe` (8 tests) -- full mission on sample_maze
-- `brain.o` -- **compile-only** with `-Werror`. It cannot be linked here because
-  `brain_host.c`, its only test, needs a generated maze header; but the object
-  compile needs no maze data and keeps `brain.c` under the same zero-warning
-  rule as the rest of the library.
+- `brain.o` -- **compile-only** with `-Werror`, keeping `brain.c` under the same
+  zero-warning rule as the rest of the library (`brain_host.c` needs a generated
+  maze header, so it cannot be linked in this script — see below).
+- `brain_oracle.exe` -- **the virtual brain, linked and RUN.** `brain.c` as a
+  stdin/stdout filter: one `BrainIn` per line in, one move out. It needs no maze
+  header (the brain discovers its map from `dist_cm` alone), so this is the one
+  place in the suite where `brain.c` is actually *executed*. `--selftest` feeds a
+  known five-junction sequence and checks the moves; `--probe` prints the same
+  sequence unchecked.
+- two `bt_monitor.py --replay` checks; see **Live capture** below.
 
 `brain_host.c` is driven by `python scripts/run_brain.py <maze.json>` instead —
 that script generates the header first. It reports **7/7 checks on 5 mazes**.
+
+> **`brain_host`'s 7/7 does not transfer to the robot.** It derives front/left/right
+> from `true_neighbor()` — the maze's real topology — so it can produce inputs the
+> hardware cannot, and never produces the hardware's corner state. See the
+> `in.front` finding in `STATUS.md` §"Bring-up on the robot".
+
+---
+
+## Live capture — `bt_monitor.py`
+
+The bring-up instrument. It opens the Bluetooth COM port, draws the brain's
+believed map and position as the data arrives, and checks every decision the robot
+makes against **the real `brain.c`** (via `brain_oracle.exe`) rather than a Python
+re-implementation — so a disagreement is a fact about the robot or the wire, not
+about a second implementation.
+
+```powershell
+python scripts/bt_monitor.py                    # GUI: pick the COM port, connect
+python scripts/bt_monitor.py --demo             # GUI smoke test, no hardware
+python scripts/bt_monitor.py --replay test/fixtures/capture_agree.txt --headless
+python scripts/bt_monitor.py --record           # also write build/bt_captures/
+```
+
+| Mode | What it does |
+|---|---|
+| (default) | GUI + live serial |
+| `--port COM7 --baud 115200` | skip the port picker |
+| `--replay <capture.txt>` | run the identical pipeline from a file, no serial |
+| `--headless` | no tkinter; prints a verdict; **exit 1 on any mismatch** |
+| `--demo` | synthetic data into the GUI, no hardware |
+| `--no-oracle` | plot only, skip the decision check |
+
+**Dependency:** `pip install pyserial`, needed for the serial path **only** — the
+import is guarded with a clear message, and `--replay` / `--demo` work without it.
+This is the repo's only third-party dependency.
+
+**Recording** goes to `build/bt_captures/` (gitignored), per-line flushed so a
+runaway robot does not lose the evidence:
+
+- `capture_<ts>.txt` — the wire **verbatim**, which is exactly
+  `parse_telemetry.py`'s input format, so the existing offline report still reads
+  any capture this tool makes
+- `capture_<ts>.csv` — one row per line, fixed superset schema, blanks where N/A
+- `capture_<ts>.json` — the oracle's per-junction verdicts and the two final plans
+
+**Regenerating the fixtures.** `test/fixtures/capture_agree.txt` and
+`capture_disagree.txt` are small hand-derived captures, committed so the replay
+checks in `build_all.ps1` have something to assert. They were generated from the
+oracle on 2026-09-23, so agreement is guaranteed *by construction* rather than
+assumed. To make more: build the oracle, feed it a `BrainIn` per line, and use
+`--probe` output as the robot's move column:
+
+```powershell
+build/brain_oracle.exe --probe     # the moves, unchecked
+```
+
+`capture_disagree.txt` is `capture_agree.txt` with **exactly one field changed**
+(junction 3's `ch` → `B`), and the suite asserts exactly one mismatch at that
+junction — a checker that only ever passes proves nothing.
 
 ---
 
@@ -240,11 +307,12 @@ robot codes/
 ├── scripts/                     # Automation tools
 │   ├── run_maze.py                Feed any .json → build → run → result
 │   ├── run_brain.py               Same, but drives the decision core (7/7 checks)
-│   ├── build_all.ps1              Rebuild + run all unit tests
+│   ├── build_all.ps1              Rebuild + run ALL tests (exits 1 on failure)
 │   ├── build_firmware.sh          Build + link the STM32 firmware (ARMCC 5)
 │   ├── measure_solver_ram.sh      Measure the 8 KB RAM budget, per object
 │   ├── field_to_maze.py           Real field image → maze .json + overlay check
-│   └── parse_telemetry.py         M1 capture → counts/cell, sensors, decisions
+│   ├── parse_telemetry.py         M1 capture → counts/cell, sensors, decisions
+│   └── bt_monitor.py              LIVE Bluetooth capture + virtual-brain check
 ├── inc/                         # Headers (9 files)
 │   ├── maze_types.h               Structs, enums, MazeCommand
 │   ├── maze_config.h              Memory limits, motion params
@@ -263,18 +331,22 @@ robot codes/
 │   ├── maze_fastrun.c
 │   ├── maze_solver.c
 │   └── brain.c                    Junction report → move; the two plans on DONE
-├── test/                        # Test programs (5 files)
+├── test/                        # Test programs (6 files)
 │   ├── run_maze.c                 Generic runner (reads _maze_data.h)
 │   ├── test_graph.c               Unit: graph module (6 tests)
 │   ├── test_robot.c               Unit: robot module (7 tests)
 │   ├── integration_test.c         Full mission on sample_maze (8 tests)
+│   ├── brain_oracle.c             Decision core, linked AND RUN (--selftest)
+│   ├── fixtures/                  Replay captures: agree (0) / disagree (1)
 │   └── brain_host.c               Decision core vs a robot model (7/7, 5 mazes)
-└── build/                       # Output .exe files (gitignored)
+└── build/                       # Output (gitignored)
     ├── run_maze.exe
     ├── test_graph.exe
     ├── test_robot.exe
     ├── integration_test.exe
-    └── brain.o
+    ├── brain.o
+    ├── brain_oracle.exe
+    └── bt_captures/             Captures written by bt_monitor.py
 ```
 
 ---
@@ -302,12 +374,45 @@ gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c sr
 ./build/integration_test.exe
 ```
 
-### Test 4 -- Decision core (compile-only)
+### Test 4 -- Decision core (compile-only, zero-warning check)
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc -c src/brain.c -o build/brain.o
 python scripts/run_brain.py ../simulator/mazes/real_field.json   # the real run
 ```
+
+### Test 5 -- Decision core (linked and RUN -- the virtual brain)
+
+```powershell
+gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c \
+    src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c src/brain.c \
+    test/brain_oracle.c -lm -o build/brain_oracle.exe
+./build/brain_oracle.exe --selftest     # 5 steps, exit 1 on any mismatch
+./build/brain_oracle.exe --probe        # the same steps, unchecked
+./build/brain_oracle.exe                # filter mode: BrainIn per stdin line
+```
+
+Filter mode is what `bt_monitor.py` drives. The protocol is strictly one reply per
+request — `INIT` → `OK init`, then `L R F B TARGET DIST` → `S <fields...>`, and
+`QUIT`:
+
+```
+$ printf 'INIT\n0 0 1 1 0 0\n0 1 0 1 0 20\n' | ./build/brain_oracle.exe
+OK init
+S F 0 0 0 0 1 0 0 0 0 0.0000
+S R 0 1 0 20 2 1 0 0 0 0.0000
+```
+
+Note the `S` fields carry the brain's dead-reckoned `x`/`y` in **its own frame**,
+plus `reports`, `cells`, `drift_cm`, `target_found`, `finished` and
+`fast_time_s`; on `finished` it also prints the `HOME` and `FAST` plan strings.
+
+Two things that bite if you touch this file: **`brain.c`'s state is static, so one
+process is one mission** (a second replay needs a fresh process or an `INIT`), and
+**stdout must be flushed per line** — MinGW does not honour `_IOLBF` on a pipe, so
+without the explicit `fflush` every response sits in the C library's buffer and the
+host deadlocks waiting for an answer that arrived (it is a deadlock, not a slow
+run; this cost an afternoon).
 
 ---
 
@@ -403,8 +508,12 @@ is the single command executor for both stages.
 | `bash scripts/build_firmware.sh` | Build + link the STM32 firmware → `seyed.hex` |
 | `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | **The supervised bring-up build:** +telemetry, +5 s pause per junction |
 | `python scripts/parse_telemetry.py capture.txt` | Turn a capture into measurements + brain decisions |
+| `python scripts/bt_monitor.py` | **LIVE capture + virtual-brain decision check (GUI)** |
+| `python scripts/bt_monitor.py --replay <cap> --headless` | Re-run a capture with no robot; exit 1 on mismatch |
+| `./build/brain_oracle.exe --selftest` | The virtual brain's own 5-step self-test |
 | `bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget (per object, exits 1 on overflow) |
 | `python scripts/field_to_maze.py <field.png>` | Real field image → maze `.json` |
+| `pip install pyserial` | Only needed for `bt_monitor.py`'s live serial path |
 | `gcc --version` | Verify GCC (MSYS2 MinGW) |
 
-**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` on the `brain.c` compile (must be zero-warning). Output goes to `build/` (gitignored). `test/_maze_data.h` is auto-generated and gitignored.
+**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` on the `brain.c` compile and on `brain_oracle` (both must be zero-warning). Output goes to `build/` (gitignored). `test/_maze_data.h` is auto-generated and gitignored.

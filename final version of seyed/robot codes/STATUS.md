@@ -112,8 +112,12 @@ test_graph:          6 tests, 0 failed
 test_robot:          7 tests, 0 failed
 integration_test:    8 tests, 0 failed
 brain:               compile-only, -Werror, 0 warnings
+brain_oracle:        5 steps, 0 failed  (--selftest)   <- brain.c EXECUTED
+bt_monitor replay:   agree -> 0 mismatches, exit 0
+                     disagree -> 1 mismatch, exit 1
 -----------------------------
-TOTAL:              21 tests, 0 failed, 0 warnings
+TOTAL:              21 unit tests + 1 oracle selftest + 2 replay checks,
+                    0 failed, 0 warnings
 
 brain_host:        7/7 checks on 5 mazes (real_field, sample_maze 1-4)
                    run via: python scripts/run_brain.py <maze.json>
@@ -122,6 +126,10 @@ brain_host:        7/7 checks on 5 mazes (real_field, sample_maze 1-4)
                    build_all.ps1 compiles brain.c alone (-Werror) so the
                    warning guarantee still covers it.
 ```
+
+`build_all.ps1` now **checks exit codes** on the run phase and exits 1 itself if
+anything failed. Before 2026-09-23 it printed the tests' output and reported DONE
+regardless — a failing test was visible in the scroll but did not fail the build.
 
 **31 → 21 is not lost coverage.** The 10 tests that went were `test_hal_compile`'s,
 and they tested `maze_hal.h` — a seam that no longer exists. They are in git
@@ -150,24 +158,98 @@ drives the brain from a model of the robot, so a wrong model is invisible to it.
 ```bash
 USE_TELEMETRY=1 bash scripts/build_firmware.sh   # the SUPERVISED build
 bash scripts/measure_solver_ram.sh               # the RAM budget, per object
-python scripts/parse_telemetry.py capture.txt    # read the Bluetooth log
+python scripts/bt_monitor.py                     # LIVE: watch it and check it
+python scripts/parse_telemetry.py capture.txt    # offline report, after the run
 ```
+
+**Watch it live first.** `bt_monitor.py` opens the COM port, draws the brain's
+believed map and position as the data arrives, and — the point of it — feeds the
+exact `BrainIn` each junction produced to `build/brain_oracle.exe`, which is
+**the real `brain.c`**, and compares its move with the one the robot made. Every
+junction gets a green tick or a red X *while the robot is still on the field*, so
+a bad decision is caught at the junction instead of in a report afterwards. It
+also records `build/bt_captures/capture_<ts>.txt` verbatim, which is exactly
+`parse_telemetry.py`'s input, so the offline pass below still works on it.
+
+`python scripts/bt_monitor.py --replay <capture.txt> --headless` re-runs any
+capture without a robot and exits 1 on a mismatch.
 
 Flash the telemetry hex, press KEY1, and read §2 and §6 of the report. The three
 things to look at, in order of how much they matter:
 
-1. **`in.front` at a corner.** `(s[3]||s[4]||s[5]||s[6])` is the firmware's own
-   proxy and the ONE input never verified against hardware. At a corner the
-   robot's own incoming arm may still be under the centre group, so it would read
-   "forward open" where there is no forward — and because `Forward()` is the line
-   follower, not "drive straight", the robot would steer round the corner while
-   the brain believed it went straight. `parse_telemetry.py` prints
-   `?? CORNER CANDIDATE` for exactly this. **If it fires, the fix is that one
-   expression in `brain_report()`** — not in the brain.
-2. **Drift.** `dist_cm` should snap to whole 20 cm cells with a small residue that
+0. **`in.front` cannot be independent of `left`/`right` — `L=1 ⟹ F=1`, by
+   algebra. OPEN only in *which* wrong input a corner produces.**
+
+   `main.c:932` builds `in.front` as `(s[3]||s[4]||s[5]||s[6])`, and
+   `main.c:1338-1339` builds the laterals on that **same** term:
+
+   ```
+   left_poss  = s[2] && (s[3]||s[4]||s[5]||s[6])  =  s[2] && front
+   right_poss = s[7] && (s[3]||s[4]||s[5]||s[6])  =  s[7] && front
+   ```
+
+   So `front` = 0 forces `left_poss` = `right_poss` = 0. **The brain can never be
+   handed "turn left, nothing ahead"** — that input is unreachable on this
+   hardware, whatever the sensors do. That is not a tendency or a measurement; it
+   is what the two assignments say.
+
+   The stop test at `main.c:1377` closes the loop. `head_delay` is reset whenever
+   `at_node` is true:
+
+   ```c
+   centre_dark = (s[3]==0 && s[4]==0 && s[5]==0 && s[6]==0);   /* all WHITE */
+   if (centre_dark && !at_node) head_delay++; else head_delay = 0;
+   ```
+
+   so the persistence clause **cannot fire at a node** — a node stop must come
+   from `at_node && (left_poss||right_poss)`, which forces `front` = 1.
+
+   **Therefore, at a corner with no straight-through lane, the brain receives one
+   of exactly two inputs, and both are wrong:**
+
+   | corner stop is… | mask shows | brain is told | should be |
+   |---|---|---|---|
+   | `at_node` (bits 0,9 set) | `F=1, L=1, R=0` | "straight or left" — corner ≡ T-junction | `F=0, L=1, R=0` |
+   | persistence (bits 0,9 clear) | `F=0, L=0, R=0` | **"dead end — reverse"** — corner ≡ dead end | `F=0, L=1, R=0` |
+
+   There is no third option, because `F=0` drags `L` and `R` to 0 with it. Which
+   of the two you actually get is the one thing left to measure.
+
+   **THE TEST — at a corner whose lane does not continue straight, read field 7
+   of the `J` line (the raw front mask, hex):**
+   - bits 0 **and** 9 set → `at_node` stop → corner is reported as a T-junction.
+   - bits 0/9 clear → persistence stop → corner is reported as a **dead end**.
+     (This is the more alarming of the two: the brain answers `'B'`.)
+
+   **Two things NOT to cite as evidence.** (a) `bt_monitor.py --replay
+   test/fixtures/capture_agree.txt`'s "front == (left or right) at 5 of 5
+   junctions" is **circular** — those masks were built *from* the firmware's stop
+   condition, so it restates the source rather than testing it; a fixture cannot
+   test the question it was constructed to assume. (b) **`brain_host`'s 7/7 does
+   not transfer** — it derives front/left/right from `true_neighbor()`, the maze's
+   real topology, so it *can* produce `(F=0, L=1)`, precisely the input this
+   hardware cannot.
+
+   **Why the obvious fix does not work.** `s[3..6]` *do* measure black under the
+   front-centre row, and at a corner that black is real — it is the junction the
+   robot is standing on. The problem is not that `front` is unmeasured, it is that
+   `front` is **fused** to `L`/`R`: any reading you get from `s[3..6]` arrives at
+   the brain *simultaneously* as `L`/`R`, so it cannot separate them. And a thin
+   lane and a junction blob both read black, so one instant of four centre sensors
+   cannot tell "lane continues" from "I am on a blob" either. Separating them
+   needs evidence over *distance* — the persistence trick `head_delay` already
+   uses, mirrored — and that is a firmware decision, not a patch.
+1. **Drift.** `dist_cm` should snap to whole 20 cm cells with a small residue that
    does not grow. A climbing drift means the counts-per-cell constant is wrong and
    the time-optimal planner is reasoning over a distorted map.
-3. **That the executed move is the printed one,** and that the 5 s pause holds.
+2. **That the executed move is the printed one,** and that the 5 s pause holds.
+   The live monitor's *confirm-in-the-wrong-place* flag is this check: it marks a
+   move whose predicted arrival node is not the node the next `B`/`J` reports.
+3. **That the oracle agrees on every junction.** A `DECISION MISMATCH` with a
+   clean derivation means the wire lost or duplicated a junction (a BLE drop does
+   exactly this — check the unparsed counter, and treat the rest of the run as
+   suspect rather than chasing ghosts); a `DERIVATION MISMATCH` means the wiring
+   and the telemetry are not the same expression.
 
 Then calibrate the encoder and re-run M1's three measurements.
 
@@ -238,6 +320,7 @@ robot codes/
 │   ├── measure_solver_ram.sh   ✅  (Measure the 8 KB RAM budget)
 │   ├── field_to_maze.py        ✅  (Real field image → maze .json + overlay)
 │   ├── parse_telemetry.py      ✅  (M1 capture → counts/cell, sensors, windows)
+│   ├── bt_monitor.py           ✅  (LIVE Bluetooth capture + virtual-brain check)
 │   └── run_brain.py            ✅  (Brain host test — robot-model driver)
 ├── inc/
 │   ├── maze_types.h            ✅
@@ -262,6 +345,11 @@ robot codes/
 │   ├── test_graph.c            ✅
 │   ├── test_robot.c            ✅
 │   ├── integration_test.c      ✅
+│   ├── brain_oracle.c          ✅  (brain.c as a stdin/stdout filter — the
+│   │                                virtual brain. --selftest; no maze needed)
+│   ├── fixtures/
+│   │   ├── capture_agree.txt    ✅  (replay fixture — 0 mismatches)
+│   │   └── capture_disagree.txt ✅  (one field altered — exactly 1 mismatch)
 │   └── brain_host.c            ✅  (7/7 on 5 mazes — robot model, not a replayer)
 ├── SENSORS.md                  📋  Sensor map: s[i] ↔ silkscreen ↔ MUX ↔ role
 ├── BUILD_GUIDE.md              📋
@@ -284,6 +372,17 @@ python scripts/run_brain.py ../simulator/mazes/real_field.json   # decision core
 ```powershell
 .\scripts\build_all.ps1
 ```
+Now also builds `brain_oracle`, runs its `--selftest`, and runs the two
+`bt_monitor.py` replay checks. **Exits 1 if anything failed.**
+
+### Live capture (the bring-up instrument)
+```powershell
+python scripts/bt_monitor.py                                  # GUI: pick COM port, connect
+python scripts/bt_monitor.py --replay test/fixtures/capture_agree.txt --headless
+python scripts/bt_monitor.py --demo                           # GUI smoke test, no hardware
+```
+Needs `pip install pyserial` for the serial path only — `--replay` and `--demo`
+work without it. Records raw `.txt` + `.csv` + `.json` into `build/bt_captures/`.
 
 ### Manual (rarely needed)
 ```powershell
@@ -294,6 +393,13 @@ gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c test/test_graph.c -
 gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c test/test_robot.c -o build/test_robot.exe
 gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/integration_test.c -lm -o build/integration_test.exe
 gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc -c src/brain.c -o build/brain.o   # compile-only; its test needs a maze header
+
+# brain_oracle -- the virtual brain. Links and RUNS brain.c, needs no maze data.
+gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c \
+    src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c src/brain.c \
+    test/brain_oracle.c -lm -o build/brain_oracle.exe
+build/brain_oracle.exe --selftest     # 5 steps; exit 1 on any mismatch
+build/brain_oracle.exe --probe        # print the same steps, unchecked
 ```
 
 ## Design decisions (don't change without asking)

@@ -105,51 +105,108 @@ def fmt_sensors(bits, width):
     return "".join("X" if i in on else "." for i in range(width))
 
 
+def parse_line(line, lineno=0):
+    """Parse ONE wire line -> (kind, record).
+
+      ("S"|"J"|"B"|"Z", dict)   a recognised line
+      ("BAD", (lineno, line))   telemetry-SHAPED but broken -- the alarm
+      ("BANNER", (lineno, line)) not telemetry at all -- benign, never dropped
+      (None, None)              blank or a '#' comment
+
+    BAD and BANNER are deliberately separate, and `bt_monitor.py` splits them
+    the same way so both tools' "unparsed" counter means the same thing.  The
+    firmware prints `Hi ,mmdi` as a boot banner on every run; calling that
+    "unparsed" would train the operator to ignore the counter that exists to
+    reveal a dropped junction.  Neither kind is ever silently dropped.
+
+    THIS FUNCTION IS THE WIRE FORMAT.  `parse()` below and the live monitor
+    (`bt_monitor.py --replay` / the GUI) both go through it, so a change to the
+    field order cannot make one of them right and the other quietly wrong --
+    which is the failure this project has already been bitten by once (a RAM
+    check that parsed a row the build never emitted and so passed vacuously).
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        # A '#' line is a comment, not a damaged record.  The firmware never
+        # emits one; the test fixtures and hand-annotated captures do, and
+        # calling those "unparsed" would cry wolf on every run.
+        return None, None
+    f = line.split(",")
+    try:
+        if f[0] == "S" and len(f) == 9:
+            return "S", {
+                "ms": int(f[1]), "front": int(f[2], 16),
+                "rear": int(f[3], 16), "e0": int(f[4]), "e1": int(f[5]),
+                "L": int(f[6]), "R": int(f[7]), "cross": int(f[8]),
+            }
+        if f[0] == "J" and len(f) == 15:
+            return "J", {
+                "ms": int(f[1]), "ch": f[2], "nav": int(f[3]),
+                "head": int(f[4]), "raw": int(f[5]), "cm": int(f[6]),
+                "front": int(f[7], 16), "rear": int(f[8], 16),
+                "L": int(f[9]), "R": int(f[10]), "cross": int(f[11]),
+                # Fields 12-14 are the brain's.  `target` is the OnEndZoon
+                # latch, `dist_cm` is the distance the brain was handed for
+                # this link (already in cm, after the off-by-10-mm
+                # simplification described in main.c), and `node` is the node
+                # id the brain settled on.
+                "target": int(f[12]), "dist_cm": int(f[13]),
+                "node": int(f[14]),
+            }
+        if f[0] == "B" and len(f) == 7:
+            # The bring-up line: printed BEFORE the 5 s supervised pause and
+            # flushed ahead of it, so it is the record of what the brain
+            # decided and where it thought it was when it decided.
+            return "B", {
+                "ms": int(f[1]), "node": int(f[2]), "x": int(f[3]),
+                "y": int(f[4]), "drift": int(f[5]), "move": f[6],
+            }
+        if f[0] == "Z" and len(f) == 3:
+            return "Z", {"ms": int(f[1]), "state": int(f[2])}
+    except (ValueError, IndexError):
+        pass
+    # Two different failures, and conflating them cries wolf.  A line that is
+    # NOT telemetry-shaped is the firmware's boot banner (`Hi ,mmdi`, main.c)
+    # or other human chatter -- benign, expected on every real capture.  A line
+    # that IS shaped like telemetry (`J,...`) but does not parse is the alarming
+    # kind: a dropped or truncated record.  `bt_monitor.py` splits them the same
+    # way, so both tools' "unparsed" counter means the same thing.
+    if f[0] in ("S", "J", "B", "Z"):
+        return "BAD", (lineno, line)
+    return "BANNER", (lineno, line)
+
+
+def iter_parsed(lines, first_lineno=1):
+    """Yield (lineno, kind, record) for every non-blank line of `lines`.
+
+    A live consumer feeds this one line at a time; `parse()` feeds it a file.
+    """
+    for lineno, line in enumerate(lines, first_lineno):
+        kind, rec = parse_line(line, lineno)
+        if kind is None:
+            continue
+        yield lineno, kind, rec
+
+
 def parse(path):
-    s_lines, j_lines, z_lines, b_lines, bad = [], [], [], [], []
+    """Capture file -> (s_lines, j_lines, z_lines, b_lines, bad, banner).
+
+    `bad` is the alarming set: telemetry-shaped lines that did not parse, i.e.
+    evidence the wire lost or truncated something.  `banner` is benign chatter
+    (the firmware's `Hi ,mmdi` boot banner).  Keep them apart -- see parse_line.
+    """
+    buckets = {"S": [], "J": [], "Z": [], "B": []}
+    bad = []
+    banner = []
     with open(path, "r", errors="replace") as fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.strip()
-            if not line:
-                continue
-            f = line.split(",")
-            try:
-                if f[0] == "S" and len(f) == 9:
-                    s_lines.append({
-                        "ms": int(f[1]), "front": int(f[2], 16),
-                        "rear": int(f[3], 16), "e0": int(f[4]), "e1": int(f[5]),
-                        "L": int(f[6]), "R": int(f[7]), "cross": int(f[8]),
-                    })
-                elif f[0] == "J" and len(f) == 15:
-                    j_lines.append({
-                        "ms": int(f[1]), "ch": f[2], "nav": int(f[3]),
-                        "head": int(f[4]), "raw": int(f[5]), "cm": int(f[6]),
-                        "front": int(f[7], 16), "rear": int(f[8], 16),
-                        "L": int(f[9]), "R": int(f[10]), "cross": int(f[11]),
-                        # Fields 12-14 are the brain's.  `target` is the
-                        # OnEndZoon latch, `dist_cm` is the distance the brain
-                        # was handed for this link (already in cm, after the
-                        # off-by-10-mm simplification described in main.c), and
-                        # `node` is the node id the brain settled on.
-                        "target": int(f[12]), "dist_cm": int(f[13]),
-                        "node": int(f[14]),
-                    })
-                elif f[0] == "B" and len(f) == 7:
-                    # The bring-up line: printed BEFORE the 5 s supervised
-                    # pause and flushed ahead of it, so it is the record of
-                    # what the brain decided and where it thought it was when
-                    # it decided.
-                    b_lines.append({
-                        "ms": int(f[1]), "node": int(f[2]), "x": int(f[3]),
-                        "y": int(f[4]), "drift": int(f[5]), "move": f[6],
-                    })
-                elif f[0] == "Z" and len(f) == 3:
-                    z_lines.append({"ms": int(f[1]), "state": int(f[2])})
-                else:
-                    bad.append((lineno, line))
-            except (ValueError, IndexError):
-                bad.append((lineno, line))
-    return s_lines, j_lines, z_lines, b_lines, bad
+        for lineno, kind, rec in iter_parsed(fh):
+            if kind == "BAD":
+                bad.append(rec)
+            elif kind == "BANNER":
+                banner.append(rec)
+            else:
+                buckets[kind].append(rec)
+    return buckets["S"], buckets["J"], buckets["Z"], buckets["B"], bad, banner
 
 
 def estimate_cell(raws, lo=40.0, hi=260.0, step=0.25, top=5):
@@ -179,7 +236,7 @@ def estimate_cell(raws, lo=40.0, hi=260.0, step=0.25, top=5):
 
 
 def report(args):
-    s_lines, j_lines, z_lines, b_lines, bad = parse(args.path)
+    s_lines, j_lines, z_lines, b_lines, bad, banner = parse(args.path)
     print("=" * 74)
     print(" M1 telemetry report -- %s" % args.path)
     print("=" * 74)
@@ -188,9 +245,17 @@ def report(args):
     print("  Z events  : %d" % len(z_lines))
     print("  B events  : %d  (bring-up decisions, supervised build only)"
           % len(b_lines))
+    if banner:
+        # Benign: the firmware's `Hi ,mmdi` boot banner and human chatter.
+        # Counted, not alarming -- a non-zero BANNER is normal on every capture.
+        print("  banner    : %d line(s), ignored (first: %r)"
+              % (len(banner), banner[0][1][:60]))
     if bad:
-        print("  UNPARSED  : %d lines (first: %r)" % (len(bad), bad[0][1][:60]))
-        print("              -> wrong firmware build, or a truncated capture?")
+        print("  UNPARSED  : %d TELEMETRY-SHAPED line(s) did not parse"
+              % len(bad))
+        print("              (first: %r)" % (bad[0][1][:60],))
+        print("              -> a dropped/truncated record, or a build whose")
+        print("                 field count differs.  Treat the run as suspect.")
     if not s_lines and not j_lines:
         print("\n  Nothing recognisable.  Is this a USE_TELEMETRY capture?")
         return 1

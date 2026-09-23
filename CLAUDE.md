@@ -37,6 +37,18 @@ python "final version of seyed/simulator/maze generator/maze_generator.py"
 
 **Dependencies:** Python 3.x with tkinter (stdlib). Pillow (`pip install pillow`) optional — anti-aliased circles fall back gracefully. Both apps are single-file; the solver auto-loads `simulator/mazes/sample_maze.json` on startup if present.
 
+### Live capture (bring-up instrument)
+
+```bash
+cd "final version of seyed/robot codes"
+python scripts/bt_monitor.py                  # GUI: pick the COM port, connect
+python scripts/bt_monitor.py --replay test/fixtures/capture_agree.txt --headless
+```
+
+Opens the Bluetooth COM port and, as the data arrives, draws the brain's believed map and checks **every decision the robot makes against the real `brain.c`** — spawned as `build/brain_oracle.exe`, not a Python re-implementation — so a disagreement is a fact about the robot or the wire, not about a second implementation. Recordings land in `build/bt_captures/` as verbatim `.txt` (readable by `parse_telemetry.py`) + `.csv` + `.json`.
+
+**`pyserial` is the repo's only third-party dependency** (rule 6's stdlib preference): imported inside a `try` with a clear `pip install pyserial` message, needed **only** for the live serial path — `--replay`, `--demo` and `--headless` run without it.
+
 ### C Solver (testing)
 
 ```bash
@@ -51,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build_all.ps1
 
 **Toolchain:** verified working here — GCC 14.2.0 (MSYS2 MinGW, `/c/msys64/mingw64/bin/gcc`) and Python 3.14 (`/c/Python314/python`). If `gcc` is not found, add it: `export PATH="/c/msys64/mingw64/bin:$PATH"`.
 
-**Which tests actually run:** `build_all.ps1` builds 4 targets and runs 3 — `test_graph` (6) + `test_robot` (7) + `integration_test` (8) = **21 tests**. The fourth is `brain.o`, a **compile-only** `-Werror` build: it cannot be linked there because `brain_host.c` (its only test) needs a generated maze header, and `scripts/run_brain.py` drives that instead — **7/7 checks on 5 mazes**.
+**Which tests actually run:** `build_all.ps1` builds 5 targets and runs them all — `test_graph` (6) + `test_robot` (7) + `integration_test` (8) = **21 unit tests**, plus `brain_oracle --selftest` (**5 steps — the one place `brain.c` is actually *executed***), plus `bt_monitor.py --replay` on two fixtures (**0 mismatches on the agreeing one, exactly 1 on the disagreeing one**). **It exits 1 if anything failed.** The `brain.o` target stays a **compile-only** `-Werror` build, keeping `brain.c` under the zero-warning rule; `brain_host.c` (its maze-driven test) needs a generated maze header, so `scripts/run_brain.py` drives that instead — **7/7 checks on 5 mazes**. Note that 7/7 **does not transfer to the robot**: `brain_host.c` derives its inputs from the maze's true topology, so it can produce inputs the hardware cannot (see the `in.front` finding below).
 
 All C flags: `-std=c11 -Wall -Wextra -pedantic`, plus `-lm` (fast-run float math) and `-Werror` for the `brain.c` compile (must stay zero-warning). Output goes to `build/`; `test/_maze_data.h` is generated per-run — both gitignored.
 
@@ -114,8 +126,9 @@ Portable C maze solver for STM32G031G8Ux — 9 headers, 7 sources, 21 tests, zer
 robot codes/
 ├── inc/          # 9 headers (types, config, 6 modules, brain.h)
 ├── src/          # 7 implementations (graph, robot, explore, proof, fastrun, solver, brain)
-├── test/         # 4 test programs + run_maze.c generic runner
-├── scripts/      # run_maze.py, run_brain.py, build_all.ps1, build_firmware.sh, ...
+├── test/         # 5 test programs + run_maze.c generic runner + fixtures/
+├── scripts/      # run_maze.py, run_brain.py, build_all.ps1, build_firmware.sh,
+│                 # parse_telemetry.py, bt_monitor.py, ...
 └── build/        # compiled output (gitignored)
 ```
 
@@ -201,7 +214,27 @@ On `BRAIN_DONE`, `brain_home_path()` and `brain_fast_path()` supply the two repl
 - `New Start/Simulator/py-code/maze solving/maze_gbf/stm-sample-code/main.c` — an earlier `USE_MAZE_GBF` integration via a `maze_hal.h` (history)
 - `final version of seyed/robot codes/inc/brain.h` — **the contract.** Read this before touching `main.c`.
 
-**Remaining work:** on-target bring-up only. Nothing in the repo can check the brain's *model* against the physical robot (`brain_host.c` drives the brain from a model of the robot, so a wrong model is invisible to it). Flash `USE_TELEMETRY=1`, press KEY1, and read §2 and §6 of `parse_telemetry.py`'s report.
+**Remaining work:** on-target bring-up only. Nothing in the repo can check the brain's *model* against the physical robot (`brain_host.c` drives the brain from a model of the robot, so a wrong model is invisible to it). Flash `USE_TELEMETRY=1`, press KEY1, and **watch it live with `scripts/bt_monitor.py`** — it feeds each junction's real `BrainIn` to `build/brain_oracle.exe` (the real `brain.c`) and flags a divergent decision at the junction, while the robot is still on the field. Then read §2 and §6 of `parse_telemetry.py`'s report for the offline measurements.
+
+**⚠ OPEN — settle on the robot before trusting P1: `in.front` is fused to `left`/`right`.** `main.c:932` builds `in.front` as `(s[3]||s[4]||s[5]||s[6])`, and `main.c:1338-1339` builds the laterals on that **same** term, so:
+
+```
+left_poss  = s[2] && (s[3]||s[4]||s[5]||s[6])  =  s[2] && front
+right_poss = s[7] && (s[3]||s[4]||s[5]||s[6])  =  s[7] && front
+```
+
+`front = 0` therefore forces `left = right = 0`. **`L=1 ⟹ F=1` is an identity, not a tendency** — the brain can never be handed "turn left, nothing ahead", which is exactly what a corner is. The stop test at `main.c:1377` closes the loop: `head_delay` is reset whenever `at_node` is true, so the persistence clause cannot fire at a node, so a node stop must come from `at_node && (left_poss||right_poss)` and therefore has `front = 1`.
+
+**So at a corner with no straight-through lane the brain gets one of exactly two inputs, and both are wrong:**
+
+| corner stop is… | mask | brain is told | should be |
+|---|---|---|---|
+| `at_node` (bits 0,9 set) | `F=1, L=1, R=0` | corner ≡ T-junction → P1 answers `'F'` | `F=0, L=1, R=0` |
+| persistence (bits 0,9 clear) | `F=0, L=0, R=0` | **corner ≡ dead end** → brain answers `'B'` | `F=0, L=1, R=0` |
+
+**The test — at a corner whose lane does not continue straight, read field 7 of the `J` line (raw mask, hex):** bits 0 **and** 9 set → it is reported as a T; bits 0/9 clear → reported as a dead end.
+
+**Do not cite the replay fixtures as evidence** — `bt_monitor.py --replay`'s "front == (left or right) at 5 of 5 junctions" is **circular** (the masks were built from the firmware's own stop condition, so it restates the source). A fixture cannot test the question it was constructed to assume. Details in `robot codes/STATUS.md` and the 2026-09-23 CHANGELOG entry.
 
 ---
 
@@ -214,6 +247,8 @@ On `BRAIN_DONE`, `brain_home_path()` and `brain_fast_path()` supply the two repl
 | `cd "final version of seyed/robot codes" && python scripts/run_maze.py ../simulator/mazes/<file>.json` | Test any maze with the C solver |
 | `cd "final version of seyed/robot codes" && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build_all.ps1` | Rebuild + run C tests (21) |
 | `cd "final version of seyed/robot codes" && python scripts/run_brain.py ../simulator/mazes/real_field.json` | Decision core vs a robot model (7/7) |
+| `cd "final version of seyed/robot codes" && python scripts/bt_monitor.py` | **Live Bluetooth capture + virtual-brain decision check** (needs `pip install pyserial`) |
+| `cd "final version of seyed/robot codes" && python scripts/bt_monitor.py --replay test/fixtures/capture_agree.txt --headless` | Re-run a capture with no robot; exit 1 on any mismatch |
 | `cd "final version of seyed/robot codes" && bash scripts/build_firmware.sh` | Build + link the STM32 firmware (ARMCC 5) |
 | `cd "final version of seyed/robot codes" && bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget |
 | `gcc --version` | Verify GCC (MSYS2 MinGW) |
@@ -228,6 +263,7 @@ On `BRAIN_DONE`, `brain_home_path()` and `brain_fast_path()` supply the two repl
 - **Frontier** — A visited node with at least one unexplored incident edge (drawn as yellow stubs)
 - **Heading** — Robot's facing as unit vector (N/E/S/W)
 - **Command** — `F` forward, `L` turn left, `R` turn right, `B` U-turn. **One command is one STOP, not one graph edge**: it means "turn as told, then drive until you reach somewhere you would stop", so it can carry the robot several cells.
+- **Corner** — A node where **the lane turns 90° and there is no way straight on**: exactly one lateral exit, `back` (the way you came), and **no `front`**. In `BrainIn` terms `(F=0, L=1, R=0)` or `(F=0, L=0, R=1)`. It is *not* a corner if a straight-through lane exists (that is a T or a crossing), and a dead end (`F=0, L=0, R=0`) is not one either. The distinction matters because the hardware cannot currently report it — see rule 9 in `ARCHITECTURE.md` §5.
 - **Stop point** — A junction the robot actually comes to rest at (lateral exit, or dead end). A node with only a forward exit is driven *through* without a report.
 - **proven_optimal** — Exploration stopped early with incomplete map (proof by time bound)
 - **fully_explored** — Explored every edge before finishing

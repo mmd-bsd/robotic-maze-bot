@@ -60,8 +60,10 @@ SEYED/
 │   ├── robot codes/                  C maze solver port for STM32 firmware
 │   │   ├── inc/                      headers (types, config, modules, brain)
 │   │   ├── src/                      implementations (graph, robot, FSM, brain, …)
-│   │   ├── test/                     unit + integration tests (21 tests)
-│   │   ├── scripts/                  build_all.ps1, run_maze.py, run_brain.py, …
+│   │   ├── test/                     unit + integration tests (21) + brain_oracle
+│   │   │   └── fixtures/             bt_monitor replay captures (agree/disagree)
+│   │   ├── scripts/                  build_all.ps1, run_maze.py, run_brain.py,
+│   │   │                             parse_telemetry.py, bt_monitor.py, …
 │   │   └── STATUS.md                 module status, build commands, design notes
 │   ├── firmware/                     STM32G031 firmware (the robot)
 │   │   ├── Core/Src/main.c           superloop, motion, and the brain seam
@@ -217,42 +219,79 @@ These are hard-won; keep them in mind before changing the simulator.
    `fully_explored` = genuinely explored everything. They are mutually
    exclusive.
 
+### Brain / firmware seam
+8. **The seam is `brain_step()` — a pure decision function.** `BrainIn` in, one
+   `'F'/'L'/'R'/'B'` out, the two plan strings on `BRAIN_DONE`. The brain never
+   reads a sensor, motor, encoder or compass and holds no firmware pointer; the
+   firmware keeps all sensing and all motion. There is no HAL (two integration
+   points for one job meant two RAM budgets).
+9. **An input built from the same expression as another input is not independent
+   of it — and the coupling can make a state unreachable.** The live case:
+   `main.c:932` builds `in.front` as `(s[3]||s[4]||s[5]||s[6])`, and
+   `main.c:1338-1339` builds the laterals on that *same* term, so
+   `left_poss = s[2] && front` and `right_poss = s[7] && front`. Hence **`L=1 ⟹
+   F=1`, identically**: `front = 0` forces both laterals to 0, and the input
+   `(F=0, L=1)` — a corner — **is unreachable on this hardware whatever the
+   sensors do**. Add the stop test at `main.c:1377` (`head_delay` is reset at a
+   node, so a node stop must come from `at_node && (left_poss||right_poss)`) and
+   a corner must reach the brain as *either* `(F=1,L=1)` — corner read as a
+   T-junction — *or* `(F=0,L=0)` — corner read as a **dead end**. Both wrong; only
+   the mask's bits 0/9 say which (see `STATUS.md`).
+   **When adding a `BrainIn` field, check what it is already implied by, and
+   whether the implication makes some real-world state unrepresentable.**
+10. **A model-driven host test cannot validate a hardware-derived input, and a
+    fixture cannot test the question it was built to assume.** `brain_host.c`
+    derives front/left/right from `true_neighbor()` — the maze's real topology —
+    so it *can* produce `(F=0, L=1)` (which the hardware cannot) and never
+    produces the hardware's corner state; its 7/7 passes on an input the robot
+    cannot generate. And `bt_monitor.py`'s replay fixtures are **synthetic**: the
+    capture's masks were built from the firmware's own stop condition (`centre
+    live AND >=1 lateral`), so replaying them and reporting "front is 1 at 5 of 5
+    junctions" only restates the identity in item 9. Both are false-confidence
+    traps. Only a real capture tests this.
+11. **A command is one STOP, not one graph edge** — "turn as told, then drive
+    until you reach somewhere you would stop", so it can carry the robot several
+    cells. Consequently the home path is **not a retrace** (it is the shortest
+    path on the discovered graph and may leave by a different branch), and the
+    home and fast path strings are one continuous stream: the home path assumes
+    the current heading, the fast path the heading after the home run.
+
 ### Maze rules
-8. Mazes are **90° only** — all edges horizontal or vertical. The generator
-   enforces this.
-9. Coordinates are world units; **Y is up**. `grid_size` defaults to 20.
+12. Mazes are **90° only** — all edges horizontal or vertical. The generator
+    enforces this.
+13. Coordinates are world units; **Y is up**. `grid_size` defaults to 20.
 
 ### GUI / graphics
-10. **Dark theme.** Colors are defined as constants at the top of each file
+14. **Dark theme.** Colors are defined as constants at the top of each file
     (`BG`, `PANEL_BG`, `CARD_BG`, `CANVAS_BG`, `FG`, `ACCENT`, `ACCENT2`, …).
     Reuse them; don't hard-code new colors ad hoc.
-11. **Tkinter ovals are NOT anti-aliased.** Render circles via **Pillow
+15. **Tkinter ovals are NOT anti-aliased.** Render circles via **Pillow
     supersampling** (`_circle_image`, drawn at 4× then LANCZOS-downscaled,
     cached by `(fill, outline, r, ow)`). Keep PhotoImage references alive
     (the cache holds them).
-12. **Windows DPI:** call `_enable_hidpi()` (SetProcessDpiAwareness) before
+16. **Windows DPI:** call `_enable_hidpi()` (SetProcessDpiAwareness) before
     creating the Tk root, and set `tk scaling`, or everything renders blurry on
     high-DPI screens.
-13. The **target is a circle** (black fill + red ring), not a square.
-14. The side **panel is resizable** (a `PanedWindow` sash) **and scrollable**
+17. The **target is a circle** (black fill + red ring), not a square.
+18. The side **panel is resizable** (a `PanedWindow` sash) **and scrollable**
     (inner Canvas + Scrollbar + mouse-wheel) so it works on small screens.
     Keep panel content in fixed heights (e.g. command log) so the scroll region
     is correct.
-15. **Playback is a real-time multiplier** (`0.25x … 8x`, snapped), not a raw
+19. **Playback is a real-time multiplier** (`0.25x … 8x`, snapped), not a raw
     delay: at `1x` the animation runs in **true real time** (the frame interval
     is fixed at `FRAME_MS`; each frame advances sim-time by
     `FRAME_MS/1000 · playback`). This is separate from the robot's physical
     **Max speed / Max accel** (cm, cm/s, cm/s²) — never conflate the two.
 
 ### Project / workflow
-16. Prefer **self-contained files** (the project values single-file scripts) and
+20. Prefer **self-contained files** (the project values single-file scripts) and
     **standard library only** (Pillow optional). Don't add heavy deps casually.
-17. The shell here is **PowerShell on Windows** — chain commands with `;`, not
+21. The shell here is **PowerShell on Windows** — chain commands with `;`, not
     `&&`. Quote paths with spaces (the repo path has spaces).
-18. Don't break `New Start/` or `old docs/`; treat them as read-only history.
-19. When unsure about a product decision (data format, scope, UX), ask — the
+22. Don't break `New Start/` or `old docs/`; treat them as read-only history.
+23. When unsure about a product decision (data format, scope, UX), ask — the
     user prefers being consulted on meaningful trade-offs.
-20. **Always update [`CHANGELOG.md`](./CHANGELOG.md)** in the same turn you
+24. **Always update [`CHANGELOG.md`](./CHANGELOG.md)** in the same turn you
     change the code: append a dated entry (newest first) with what/why/decisions
     and any new lessons. Keep `ARCHITECTURE.md`/`ALGORITHMS.md` in sync too.
 
@@ -270,6 +309,11 @@ These are hard-won; keep them in mind before changing the simulator.
   and disappear when the robot enters that specific edge.
 - **Heading** — the robot's current facing as a unit vector (N/E/S/W).
 - **Command** — `F` forward, `L` turn left, `R` turn right, `B` U-turn (reverse).
+- **Corner** — a node where the lane turns 90° **and there is no lane straight
+  on**: one lateral exit, `back`, and no `front` — `(F=0, L=1, R=0)` or
+  `(F=0, L=0, R=1)`. A straight-through lane makes it a T or a crossing, not a
+  corner; `(F=0, L=0, R=0)` is a dead end. Worth naming because the hardware
+  cannot currently report this state at all (rule 9).
 - **proven_optimal** — exploration stopped early because no undiscovered path
   could beat the best known one (map intentionally incomplete).
 - **fully_explored** — exploration discovered every edge before finishing.
