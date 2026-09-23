@@ -51,11 +51,16 @@ $builds += @{
     Cmd  = "gcc $FLAGS -I $INC $SRC/maze_graph.c $SRC/maze_robot.c $SRC/maze_explore.c $SRC/maze_proof.c $SRC/maze_fastrun.c $SRC/maze_solver.c $TEST/$name.c -lm -o $OUT/$name.exe"
 }
 
-# ---- test_hal_compile ----
-$name = "test_hal_compile"
+# ---- brain.c (compile-only, -Werror) ----
+# The decision core's warning check.  It cannot be LINKED here -- brain_host,
+# its only test, needs a generated _maze_data.h and is driven by
+# scripts/run_brain.py instead -- but the object compile needs no maze data and
+# is what keeps brain.c under the same zero-warning rule as the rest of the
+# library.  Compile-only, so it is not run below.
+$name = "brain"
 $builds += @{
     Name = $name
-    Cmd  = "gcc $FLAGS_WERROR -I $INC $SRC/maze_graph.c $SRC/maze_robot.c $SRC/maze_explore.c $SRC/maze_proof.c $SRC/maze_fastrun.c $SRC/maze_solver.c $TEST/$name.c -lm -o $OUT/$name.exe"
+    Cmd  = "gcc $FLAGS_WERROR -I $INC -c $SRC/brain.c -o $OUT/brain.o"
 }
 
 # -- BUILD --
@@ -79,7 +84,9 @@ Write-Host "  RUN ALL" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# -- RUN (skip test_hal_compile which needs stubbed firmware globals) --
+# -- RUN --
+# brain is compile-only, so it is not listed (its test needs a generated maze
+# header -- see scripts/run_brain.py).
 $runs = @("test_graph","test_robot","integration_test")
 foreach ($name in $runs) {
     $exe = "$OUT/$name.exe"

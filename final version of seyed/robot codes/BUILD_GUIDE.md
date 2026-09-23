@@ -59,12 +59,17 @@ Example output:
 .\scripts\build_all.ps1
 ```
 
-This builds and runs all unit tests (21 tests total):
+This builds 4 targets and runs 3 of them (21 tests total):
 - `test_graph.exe` (6 tests) -- nodes, edges, Dijkstra
 - `test_robot.exe` (7 tests) -- heading, commands, frontiers
 - `integration_test.exe` (8 tests) -- full mission on sample_maze
+- `brain.o` -- **compile-only** with `-Werror`. It cannot be linked here because
+  `brain_host.c`, its only test, needs a generated maze header; but the object
+  compile needs no maze data and keeps `brain.c` under the same zero-warning
+  rule as the rest of the library.
 
-(Also builds `test_hal_compile.exe` for STM32 HAL verification, but doesn't auto-run it.)
+`brain_host.c` is driven by `python scripts/run_brain.py <maze.json>` instead —
+that script generates the header first. It reports **7/7 checks on 5 mazes**.
 
 ---
 
@@ -75,16 +80,17 @@ Compiler 5, which is installed at `C:\Keil_v5\ARM\ARMCC\bin`. You do **not** nee
 to open the Keil IDE to check that it compiles, links, and fits:
 
 ```bash
-# Firmware as it is today (left-hand rule):
+# The brain-driven firmware (what flashes today):
 bash scripts/build_firmware.sh
 
-# Same, with USE_MAZE_SOLVER defined:
-USE_SOLVER=1 bash scripts/build_firmware.sh
-
-# M1 bench build: same left-hand firmware + sensor/encoder telemetry.
-# This is the build you flash to calibrate the robot (see below).
+# Supervised build: the same firmware plus telemetry AND a 5 s pause before
+# every junction move.  This is the bring-up build -- see below.
 USE_TELEMETRY=1 bash scripts/build_firmware.sh
 ```
+
+There is no `USE_SOLVER` switch any more and no legacy fallback: the decision
+core *is* the decision maker, unconditionally. The legacy left-hand-rule
+explorer was deleted outright on 2026-09-23 (it still exists in git history).
 
 Output goes to `build/firmware/` (gitignored): `.o` objects, `seyed.axf`,
 **`seyed.hex`** (flashable), the link map, and the scatter file used.
@@ -92,40 +98,48 @@ Output goes to `build/firmware/` (gitignored): `.o` objects, `seyed.axf`,
 It prints Keil's own size line and a budget check:
 
 ```
- Program Size: Code=34232 RO-data=612 RW-data=1424 ZI-data=6208
- FLASH :  34880 /  65536 bytes  (53% used, 30656 free)
- RAM   :   7632 /   8192 bytes  (93% used, 560 free)
+ Program Size: Code=39748 RO-data=... RW-data=... ZI-data=5872
+ FLASH :  40820 /  65536 bytes  (62% used, 24716 free)
+ RAM   :   6832 /   8192 bytes  (83% used, 1360 free)
 ```
 
 ### Does it still fit in RAM?
 
-**RAM is the binding constraint on this project.** The firmware alone already uses
-93% of the 8 KB, and the solver does not yet link alongside the legacy path/map
-arrays. Measure before assuming:
+**RAM is the binding constraint on this project**, and it was the reason the
+legacy explorer had to go: the firmware used to carry a *second, complete* maze
+map, and two navigation stacks do not share 8 KB. Measure, don't assume:
 
 ```bash
 bash scripts/measure_solver_ram.sh
 ```
 
-It builds the firmware twice — once as-is, once with a generated patched copy of
-`main.c` that activates the solver — and reports the real numbers:
+It builds the firmware once and reports the totals from the linker, then the
+**per-object RAM breakdown, largest first**:
 
 ```
- baseline RAM (solver dormant) :  7632 bytes
- shortfall to make it link     :  1808 bytes
+== totals ==
+ FLASH :  40820 /  65536 bytes  (62% used)
+ RAM   :   6832 /   8192 bytes  (83% used, 1360 free)
+ ...
+ FITS -- 1360 bytes of RAM headroom
 ```
 
-(That shortfall was 3208 B before the solver's config was sized to the real
-8x7 field; see `inc/maze_config.h` and CHANGELOG.md.)
+It **exits 1** if the build overflows, and also if it cannot read the linker's
+totals at all — a silent zero there would make the fit check pass vacuously.
 
-Note that 1536 B of the 7632 is the startup file's `Stack_Size` (1024) +
-`Heap_Size` (512) reservation, and both are counted in the Keil size line — so
-the firmware's actual *variables* account for 6096 B. That matters because the
-solver's heaviest stack frame (`maze_time_optimal_path()`, five
-`MAZE_MAX_NODES`-sized arrays) is 704 B at 64 nodes against a 1024 B stack.
+Note that part of the RAM total is the startup file's `Stack_Size` (1024) +
+`Heap_Size` (512) reservation, and both are counted in the Keil size line. That
+matters because the solver's heaviest stack frame (`maze_time_optimal_path()`,
+five `MAZE_MAX_NODES`-sized arrays) is 704 B at 64 nodes against a 1024 B stack.
 
-`Core/Src/main.c` is never modified; the patched copy is generated fresh each run
-into `build/probe/`.
+| Build | Flash | RAM |
+|---|---|---|
+| Legacy firmware, solver dormant (the old baseline) | 34880 / 65536 (53%) | 7632 / 8192 (93%) |
+| **Brain-driven (now)** | **40820 / 65536 (62%)** | **6832 / 8192 (1360 free)** |
+| Brain-driven + telemetry | 41792 / 65536 (63%) | 6904 / 8192 (1288 free) |
+
+The brain-driven build is **800 bytes smaller than the old firmware was while
+doing nothing.**
 
 **Toolchain note:** this project uses **ARM Compiler 5 (`uAC6=0`), not armclang**.
 The solver contains no C11-only constructs (verified under
@@ -136,12 +150,25 @@ assuming a new construct is fine.
 
 ---
 
-## M1 bench telemetry (encoder calibration)
+## M1 bench telemetry — and the supervised bring-up build
 
-Before the solver can map anything, three numbers have to come off the real
-robot. `USE_TELEMETRY=1` produces a build that measures all three, and it does
-**not** change how the robot drives — the left-hand rule is untouched, so this
-build is safe to flash before any of the solver RAM work is done.
+Three numbers the brain needs cannot be derived from any file in this repo; they
+exist only on the physical robot:
+
+1. **counts per 20 cm cell**, which calibrates the entire map
+2. **which sensors actually fire** at a junction, which validates `SENSORS.md`
+3. **how long the branch detector stays live**, which is the decision's timing budget
+
+`USE_TELEMETRY=1` produces a build that measures all three — and it is also the
+**supervised build**: it arms a 5 s pause between printing a decision and making
+it. Press KEY1, and the robot stops at each junction for 5 s with the decision on
+the Bluetooth link, so a bad decision can be caught before the robot commits. The
+motors are explicitly stopped and the stop pushed to the servos before the pause,
+because the pause blocks the superloop that would otherwise re-issue the drive
+command.
+
+It changes **what** the robot decides in no way at all — telemetry and the pause
+are both guarded by the macro.
 
 ```bash
 USE_TELEMETRY=1 bash scripts/build_firmware.sh
@@ -151,22 +178,18 @@ python scripts/parse_telemetry.py capture.txt
 
 | What it adds | Cost |
 |---|---|
-| `tlm_ms` 1 ms stamp, 64 B pending line, 8 ms divider | **+72 B RAM**, +700 B flash |
-| RAM with telemetry on | 7704 / 8192 (**94%**) — fits today |
-| RAM with it off | 7632 / 8192 (93%) — compiles to the plain build's sizes |
+| `tlm_ms` 1 ms stamp, 64 B pending line, 8 ms divider | **+72 B RAM**, +~1 KB flash |
+| RAM with telemetry on | 6904 / 8192 (1288 free) |
+| RAM with it off | 6832 / 8192 (1360 free) |
 
-> **Flash this build only from 2026-09-23 or later.** Earlier telemetry hex
-> carried a `node[]` overflow that corrupted `uwTick` and the IMU's `hi2c2`
-> handle on any mission longer than 49 commands, so a capture from it could not
-> be trusted. See the `node[]` entry in CHANGELOG.md.
-
-It writes three line types to the Bluetooth link the firmware already uses, as
+It writes four line types to the Bluetooth link the firmware already uses, as
 ASCII, at most one line per 8 ms slot:
 
 ```
 S,<ms>,<front>,<rear>,<e0>,<e1>,<L>,<R>,<cross>   125 Hz, while driving
-J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>
+J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>,<target>,<dist>,<node>
 Z,<ms>,<state>                                    target zone enter/leave
+B,<ms>,<node>,<x>,<y>,<drift>,<move>              bring-up decision (SS.6)
 ```
 
 `<front>` is `s[0..9]` as a hex bitmask and `<rear>` is `s[10..17]` — two
@@ -176,22 +199,37 @@ the firmware divides it by `2.467*2` and then adds an empirical offset, and the
 telemetry lets you check the divisor and the offsets separately instead of
 inferring them from a final number.
 
+> **The `J` line gained three fields and the `B` line is new (2026-09-23).**
+> Captures made before that date will not parse — `parse_telemetry.py` now
+> reports unparsed lines rather than silently skipping them, so an old capture
+> shows up as noise instead of as a wrong measurement.
+
+`<target>` is the target-zone flag, `<dist>` the distance the brain was told
+(cells × 20 cm), and `<node>` the brain's own node id — the three things that
+turn a capture into a check of the brain's *view* rather than just of the sensors.
+The `B` line is the bring-up decision itself: the brain's dead-reckoned position,
+its accumulated `drift`, and the move it chose — printed **before** the 5 s pause.
+
 Two constraints are worth knowing before trusting the output:
 
 - **One transmit per slot.** `BLT_SendData()` restarts the TX DMA
   (`Hardware.c:135`), so a second call before the first has drained truncates
   it. The firmware therefore queues a junction line and sends *either* that
-  *or* a stream sample, never both.
+  *or* a stream sample, never both. The `B` line is sent immediately before the
+  5 s pause, where nothing else is competing for the link.
 - **8 ms sampling against a ~20 ms branch window** gives only 2-3 samples across
   a junction. That is enough to say *which* sensors fire; it is not enough to
   measure the window to the millisecond, and `parse_telemetry.py` prints that
   caveat rather than hiding it. If a precise window is ever needed the fix is an
   on-chip ring buffer dumped after the run, not a faster radio link.
 
-`parse_telemetry.py` reports the four things M1 exists to produce: the measured
-counts-per-cell (which is what actually calibrates the map), which sensors fire
-at each junction (which validates `SENSORS.md`), the branch-window samples, and
-the target-zone timing.
+`parse_telemetry.py` reports: the measured counts-per-cell (which is what
+actually calibrates the map), which sensors fire at each junction (which
+validates `SENSORS.md`), the branch-window samples, the target-zone timing, the
+brain's own view (`dist_cm` in cells, and a total-drift check), and the bring-up
+decisions. It prints **`?? CORNER CANDIDATE`** when a junction has exactly one
+lateral exit and a forward one — the case where `in.front` may be lying about
+there being a forward path.
 
 ---
 
@@ -201,12 +239,13 @@ the target-zone timing.
 robot codes/
 ├── scripts/                     # Automation tools
 │   ├── run_maze.py                Feed any .json → build → run → result
+│   ├── run_brain.py               Same, but drives the decision core (7/7 checks)
 │   ├── build_all.ps1              Rebuild + run all unit tests
 │   ├── build_firmware.sh          Build + link the STM32 firmware (ARMCC 5)
-│   ├── measure_solver_ram.sh      Measure the 8 KB RAM budget
+│   ├── measure_solver_ram.sh      Measure the 8 KB RAM budget, per object
 │   ├── field_to_maze.py           Real field image → maze .json + overlay check
-│   └── parse_telemetry.py         M1 capture → counts/cell, sensors, windows
-├── inc/                         # Headers (8 files)
+│   └── parse_telemetry.py         M1 capture → counts/cell, sensors, decisions
+├── inc/                         # Headers (9 files)
 │   ├── maze_types.h               Structs, enums, MazeCommand
 │   ├── maze_config.h              Memory limits, motion params
 │   ├── maze_graph.h               Node/edge CRUD, Dijkstra
@@ -215,26 +254,27 @@ robot codes/
 │   ├── maze_proof.h               Time-based early-stop proof
 │   ├── maze_fastrun.h             Trapezoidal velocity, stop-graph
 │   ├── maze_solver.h              TOP-LEVEL FSM
-│   └── maze_hal.h                 STM32 hardware bridge
-├── src/                         # Sources (6 files)
+│   └── brain.h                    THE SEAM: BrainIn in, one move out
+├── src/                         # Sources (7 files)
 │   ├── maze_graph.c
 │   ├── maze_robot.c
 │   ├── maze_explore.c
 │   ├── maze_proof.c
 │   ├── maze_fastrun.c
-│   └── maze_solver.c
+│   ├── maze_solver.c
+│   └── brain.c                    Junction report → move; the two plans on DONE
 ├── test/                        # Test programs (5 files)
 │   ├── run_maze.c                 Generic runner (reads _maze_data.h)
 │   ├── test_graph.c               Unit: graph module (6 tests)
 │   ├── test_robot.c               Unit: robot module (7 tests)
 │   ├── integration_test.c         Full mission on sample_maze (8 tests)
-│   └── test_hal_compile.c         HAL bridge smoke test (10 tests)
+│   └── brain_host.c               Decision core vs a robot model (7/7, 5 mazes)
 └── build/                       # Output .exe files (gitignored)
     ├── run_maze.exe
     ├── test_graph.exe
     ├── test_robot.exe
     ├── integration_test.exe
-    └── test_hal_compile.exe
+    └── brain.o
 ```
 
 ---
@@ -262,11 +302,11 @@ gcc -std=c11 -Wall -Wextra -pedantic -I inc src/maze_graph.c src/maze_robot.c sr
 ./build/integration_test.exe
 ```
 
-### Test 4 -- HAL bridge
+### Test 4 -- Decision core (compile-only)
 
 ```powershell
-gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_robot.c src/maze_explore.c src/maze_proof.c src/maze_fastrun.c src/maze_solver.c test/test_hal_compile.c -lm -o build/test_hal_compile.exe
-./build/test_hal_compile.exe
+gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc -c src/brain.c -o build/brain.o
+python scripts/run_brain.py ../simulator/mazes/real_field.json   # the real run
 ```
 
 ---
@@ -276,21 +316,29 @@ gcc -std=c11 -Wall -Wextra -pedantic -Werror -I inc src/maze_graph.c src/maze_ro
 ```
 Your STM32 firmware (main.c)
          │
+         │  brain_report(): builds a BrainIn from the globals the firmware
+         │  already had, calls brain_step(), gets one move back
          ▼
-    maze_hal.h          ◄-- hardware bridge (sensors, position, commands)
+      brain.h            ◄-- THE SEAM.  4 relative exits + target + dist_cm in,
+         │                   'F'/'L'/'R'/'B' or BRAIN_DONE out
+         ▼
+      brain.c            ◄-- dead reckoning + the two plan strings
          │
          ▼
-    maze_solver.c       ◄-- TOP-LEVEL: EXPLORE → RETURN_HOME → FAST_RUN → DONE
+    maze_solver.c        ◄-- TOP-LEVEL: EXPLORE → RETURN_HOME → FAST_RUN → DONE
          │
     ┌────┼────┬─────────┐
     ▼    ▼    ▼         ▼
  robot  graph explore  proof  fastrun   ◄-- workers called by the solver
 ```
 
-- **`maze_solver.c`** is the main brain -- it runs the state machine and delegates.
+- **`brain.c`** is what the firmware talks to. The robot owns everything
+  physical; the brain owns the map.
+- **`maze_solver.c`** runs the state machine and delegates.
 - **`maze_graph.c`** + **`maze_robot.c`** are pure logic (no hardware dependency).
 - **`maze_explore.c`** + **`maze_proof.c`** + **`maze_fastrun.c`** are the three mission stages.
-- **`maze_hal.h`** is header-only -- it reads STM32 globals and feeds the solver.
+- There is **no HAL**. `brain.h` never reads a sensor, motor, encoder or compass,
+  and holds no firmware pointer — that is the whole point of the seam.
 
 ---
 
@@ -306,7 +354,7 @@ maze_explore.c   ← depends on maze_graph, maze_robot, maze_proof
 maze_proof.c     ← depends on maze_graph
 maze_fastrun.c   ← depends on maze_graph
 maze_solver.c    ← depends on ALL of the above
-maze_hal.h       ← depends on maze_solver (bridges to hardware)
+brain.c          ← depends on maze_solver (drives it; knows nothing of hardware)
 ```
 
 ---
@@ -316,24 +364,32 @@ maze_hal.h       ← depends on maze_solver (bridges to hardware)
 Already wired up in `../firmware/MDK-ARM/Source.uvprojx` (group `MazeSolver`,
 plus `../../robot codes/inc` on the include path). To reproduce by hand:
 
-**Sources** (6 `.c` files): all from `src/`
+**Sources** (7 `.c` files): all from `src/`
 
 **Include paths**: add `inc/`
 
 **In `main.c`**:
 
 ```c
-#define USE_MAZE_SOLVER
-#include "maze_hal.h"
+#include "brain.h"
 
-// At boot:
-maze_hal_init();
+// On the KEY1 press (edge-detected, so holding the button cannot wipe the map):
+brain_init();
 
-// At every intersection:
-MazeCommand cmd = maze_hal_tick();
-cross = maze_cmd_to_cross(cmd);
-// ... firmware's existing motion dispatch handles the rest
+// At every junction:
+BrainIn in;
+in.left = left_poss; in.right = right_poss;
+in.front = (s[3] || s[4] || s[5] || s[6]);
+in.back = 1; in.target = OnEndZoon; in.dist_cm = <the link just closed, cm>;
+
+char move = brain_step(&in);      /* 'F'/'L'/'R'/'B', or BRAIN_DONE */
+// ... the firmware's existing cross dispatch handles the motion
 ```
+
+On `BRAIN_DONE`, `brain_home_path()` and `brain_fast_path()` supply the two
+replay strings. `main.c`'s **`set_plan()`** copies them and appends the legacy
+`'D'` end sentinel that the replay stages depend on, and **`replay_dispatch()`**
+is the single command executor for both stages.
 
 ---
 
@@ -345,9 +401,10 @@ cross = maze_cmd_to_cross(cmd);
 | `python scripts/run_brain.py <file.json>` | Test the decision core against a simulated robot |
 | `.\scripts\build_all.ps1` | Rebuild + run all unit tests |
 | `bash scripts/build_firmware.sh` | Build + link the STM32 firmware → `seyed.hex` |
-| `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | M1 bench build: +sensor/encoder telemetry |
-| `python scripts/parse_telemetry.py capture.txt` | Turn an M1 capture into measurements |
-| `bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget |
+| `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | **The supervised bring-up build:** +telemetry, +5 s pause per junction |
+| `python scripts/parse_telemetry.py capture.txt` | Turn a capture into measurements + brain decisions |
+| `bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget (per object, exits 1 on overflow) |
+| `python scripts/field_to_maze.py <field.png>` | Real field image → maze `.json` |
 | `gcc --version` | Verify GCC (MSYS2 MinGW) |
 
-**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` for HAL test (must be zero-warning). Output goes to `build/` (gitignored). `test/_maze_data.h` is auto-generated and gitignored.
+**Flags:** `-std=c11 -Wall -Wextra -pedantic` for all; `-lm` for math (fast-run floats); `-Werror` on the `brain.c` compile (must be zero-warning). Output goes to `build/` (gitignored). `test/_maze_data.h` is auto-generated and gitignored.

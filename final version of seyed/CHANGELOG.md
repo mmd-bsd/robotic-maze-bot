@@ -18,8 +18,9 @@
   claim otherwise; it was wrong and cost time. Use `export PATH=…`, `$(…)`,
   `&&`, and here-docs. `.ps1` scripts still need
   `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`.
-  (The root `CLAUDE.md` is canonical; `final version of seyed/CLAUDE.md` still
-  carries the old PowerShell claim and is stale.)
+  (The root `CLAUDE.md` is canonical. The stale partial copy at
+  `final version of seyed/CLAUDE.md` was **deleted** on 2026-09-23 — it carried
+  the old PowerShell claim and a wrong project scope.)
 - **Repo path has spaces** (`F:\Robotic fle 2022\SEYED`). Always quote paths.
 - **Console encoding is cp1252**: printing unicode like `✓` crashes test scripts.
   In quick scripts call `sys.stdout.reconfigure(encoding='utf-8')` first.
@@ -59,11 +60,27 @@
   `Program Size:` line. Use it instead of asking for a build. The Keil project is
   AC5 (`uAC6=0`), **not** armclang — verify with AC5 before assuming a compile works.
 - **RAM is the binding constraint on this project, always check it.** The firmware
-  alone already uses 93% of the 8 KB (7632/8192), of which 1536 B is the
-  `Stack_Size` (1024) + `Heap_Size` (512) reservation from the startup file — and
-  both are counted in the Keil size line. The solver still does **not** link:
-  measured shortfall **1808 B** after the config was sized to the field (was
-  3208 B). Run `bash scripts/measure_solver_ram.sh` before claiming anything fits.
+  used to use 93% of the 8 KB (7632/8192) because it carried a *second, complete*
+  maze map alongside the solver's; two navigation stacks do not fit in 8 KB. The
+  legacy explorer was deleted on 2026-09-23 and the brain-driven build now uses
+  **6832/8192 (1360 B free)** — 800 B *smaller* than the old firmware was while
+  doing nothing. Part of any total is the `Stack_Size` (1024) + `Heap_Size` (512)
+  reservation from the startup file, and both are counted in the Keil size line.
+  Run `bash scripts/measure_solver_ram.sh` before claiming anything fits.
+- **A check whose input it cannot read passes vacuously.** `build_firmware.sh`
+  parsed `fromelf` output for an `(uncompressed)` row this build never emits, so
+  `TOTAL_RAM` came out **0** and the RAM fit check — the one thing that script
+  exists for — reported success on every build for months. Measured as "0 / 8192
+  (0% used)". It now reads the linker's own `Total RW  Size` / `Total ROM Size`
+  lines and **exits 1 when it cannot**. When a check can pass by not running, make
+  the absence of data an error, not a pass.
+- **An executor's alphabet and its producer's alphabet must be checked against
+  each other.** The firmware's replay stages dispatched only `'L'/'R'/'S'/'D'`
+  while the brain emits `'F'/'L'/'R'/'B'` — no `'F'`, and fatally no `'B'`, and
+  the real field's fast path is `BFFLRLF`. A `'B'` fell through every branch and
+  the robot would have sat at the junction. Nothing in the host tests noticed,
+  because the *host* replayers understand every command the brain emits. A closed
+  loop of your own code will agree with itself; see `brain_host.c` check 5.
 - **An index is not bounded by the array it writes.** The firmware had two
   writers indexing `node[50]` by the *command count* (~70 on the real field) and
   ran 504 B off the end, into `uwTick` and `hi2c2`. When you find an array indexed
@@ -74,12 +91,178 @@
 - **Prefer measuring to estimating for anything size-related.** The exact
   symbol sizes came from `armlink --symbols`, not from adding up declarations;
   the first attempt at that sum was wrong by 60 B.
+- **A new source file goes in three places.** `scripts/build_firmware.sh`'s
+  source list, `firmware/MDK-ARM/Source.uvprojx` (the `MazeSolver` group — this
+  is what the IDE builds), and `Source.uvoptx` (GroupNumber/FileNumber for the
+  IDE's file tree). Missing the last two builds fine from the script and fails to
+  link in Keil, which is how the firmware is actually flashed. `brain.c` was
+  missing from both until 2026-09-23.
 - Keil's output dir in this project is called **`Source`**, not `Objects`.
 - Bash arrays (`"${arr[@]}"`), never space-joined strings, for paths in this repo.
 
 ---
 
 ## History (newest first)
+
+### 2026-09-23 — Retire the legacy explorer, wire in the brain, free the RAM
+
+**The firmware now runs the decision core.** The legacy left-hand-rule explorer
+is deleted outright (no `#ifndef` guard, no fallback build — the user's call), and
+the RAM blocker that made the solver unlinkable is gone:
+
+| Build | Flash | RAM |
+|---|---|---|
+| Legacy firmware, solver dormant (the old baseline) | 34880 / 65536 (53%) | 7632 / 8192 (560 free) |
+| **Brain-driven (now)** | **40820 / 65536 (62%)** | **6832 / 8192 (1360 free)** |
+| Brain-driven + telemetry (the supervised build) | 41792 / 65536 (63%) | 6904 / 8192 (1288 free) |
+
+The brain-driven build is **800 bytes smaller than the old firmware was while
+doing nothing.** The plan predicted 900–1300 B of headroom; actual is 1360 B.
+
+#### The insight that made it small
+
+The legacy mission's stages 4 and 6 are **pure replayers**: they read
+`path_back[]` / `path_discoverd_s[]` and drive the robot through them, with sensor
+logic that has nothing to do with how the string was produced. So the brain does
+not have to replace the return and fast-run logic — it only has to **fill those
+two strings**. Everything downstream keeps working, which is why this was a
+~3.2 KB deletion rather than a rewrite.
+
+#### Deleted from `firmware/Core/Src/main.c`
+
+`link[100][4]`, `node[50][6]`, `local_cross[4]`, `path_discoverd[200]`,
+`result_0/1/2`, `path_c`, the dead `short_path()` / `replaceWord()` (which held
+the firmware's only `malloc`), `back_home()`, the stage-2 map dump, and several
+dead variables. ≈ 3.2 KB freed.
+
+#### Added
+
+- **`brain_report()`** — builds a `BrainIn` from the globals the firmware already
+  had (`left_poss` / `right_poss` / the centre group / `OnEndZoon` / the existing
+  encoder arithmetic with its per-command corrections, kept verbatim — they are
+  empirical), calls `brain_step()`, returns the move. The move then goes through
+  the **unchanged** legacy `cross` dispatch to the motors.
+- **`brain_init()` on the KEY1 press**, now **edge-detected**. It was
+  `if(KEY1) loop_start=1,ti=0;` — a level test, so holding the button ran
+  `brain_init()` every pass and would have wiped the map mid-mission.
+- **`set_plan()`** — copies a brain plan and appends the legacy `'D'` end
+  sentinel, which stages 4 and 6 depend on **twice**: stage 4's arrival test is
+  `cc == strlen(path)-1` (the sentinel's index) and the stage ends when the
+  dispatched byte is `'D'`. Without it the last command is dispatched and the
+  stage then waits for a junction that never comes, driving the robot past the
+  start. Done at the firmware boundary so `brain.c`'s own contract stays clean.
+- **`replay_dispatch()`** — ONE command executor for both replay stages and all
+  four bank halves. It adds **`'F'`** (the brain's straight, the legacy's `'S'`)
+  and **`'B'`** (head flip + `cross = 0`). The `'B'` case is not optional: the
+  legacy stages had no `'B'` at all and the real field's fast path is `BFFLRLF`.
+- **A supervised bring-up pause** under `USE_MAZE_TELEMETRY`: print the decision
+  over Bluetooth, wait 5 s, then execute. The motors are explicitly stopped and
+  the stop pushed to the servos first — the delay blocks the superloop that
+  re-issues `Motor(left,right,1)` / `MotorMove(2)`, so the servos would otherwise
+  hold their last speed for the whole 5 s.
+- **Two new telemetry fields on the `J` line** (`target`, `dist_cm`, `node`) and
+  a **new `B` line** carrying the brain's own view before each move.
+
+#### Two ordering bugs in the legacy replay stages — both fixed, neither anticipated
+
+These were found by reasoning about the brain.h contract against the legacy stage
+code, and they are the most important finding of this entry. **Both would have
+driven the robot somewhere the plan did not intend.**
+
+1. **Off-by-one.** The legacy stage drives forward FIRST and dispatches
+   `path_back[cc-1]` only at the *next* junction, because `back_home()` built the
+   string as the reverse of the explored route — index 0 described the action at
+   the next node. The brain's commands mean the opposite: `'L'` means *turn 90°
+   left in place, then carry on*. Fixed by consuming the first command at the
+   junction the robot is already standing on and leaving `cc = 1`. Verified on the
+   `brain_host` trace: from node 33 facing W, `'B'` turns the robot to E **then**
+   drives 60 cm; under the legacy ordering it would have driven 60 cm the wrong
+   way first.
+2. **Head flip.** The legacy flipped `head` on entry to stages 4 and 6, because
+   its homeward run was a retrace with the rear sensor bank leading. The brain's
+   home route is explicitly **not** a retrace — it is the shortest path on the
+   discovered graph, and may leave by a different branch. `brain.h` says the home
+   path assumes the robot's *current* heading and the fast path assumes the
+   heading it will have *after* the home run: the two strings are one continuous
+   stream. Both flips removed.
+
+The entry-dispatch blocks also had to become the **first arm of the if/else-if
+chain**, or the pass that consumes the entry command fell through into the
+`if(head==0)` branch and issued `Forward()` on top of the turn just made.
+
+#### Deliberate deviation from the approved plan
+
+The plan's step 4 was "extract one `replay(const char* cmds)` used by both
+stages." What shipped is **`replay_dispatch()` — the command executor — not a
+full stage merge.** The two stages' *detection* logic differs in load-bearing
+ways: stage 4's end-detection is live and needed at the start zone, stage 6's is
+commented out and it relies on `'D'` alone, and stage 6 resets `cc` while stage 4
+does not. The correctness goal — **one place that handles `'F'` and `'B'`** — is
+fully met. The ~200-line de-duplication was deferred as the higher-risk half; a
+merge would have changed the code path that decides *when to stop*, on a robot
+that has never run this code. See the memory note: smallest change that removes
+the danger first.
+
+#### The Keil project had to learn about `brain.c`
+
+`firmware/MDK-ARM/Source.uvprojx`'s `MazeSolver` group listed the six solver
+sources but **not `brain.c`** — so a Keil IDE build (the way the firmware is
+actually flashed) would have failed to link with `Undefined symbol brain_step`
+even though `build_firmware.sh` succeeded, because the script adds `brain` by
+name. `brain.c` is now a File in both `.uvprojx` and `.uvoptx`
+(GroupNumber 5, FileNumber 33). **When you add a source, add it in three
+places: the Makefile-ish script, `.uvprojx`, and `.uvoptx`.**
+
+#### Repository
+
+Deleted: `robot codes/inc/maze_hal.h`, `robot codes/test/test_hal_compile.c`,
+`robot codes/PLAN_HAL.md`, `final version of seyed/CLAUDE.md`. The HAL seam
+assumed the solver would drive the robot through `maze_hal_tick()` while the
+legacy explorer kept its own map — not the design that shipped, and keeping both
+would have meant two integration points and two RAM budgets for one job. The one
+solver fix that came out of it is kept (`maze_solver_update_position()` runs
+sensor-driven discovery for ALL nodes, creating placeholder nodes).
+
+#### Scripts
+
+- **`build_firmware.sh`** — dropped the `USE_SOLVER` switch (nothing tests
+  `USE_MAZE_SOLVER` any more), added `brain` to the source list, and **fixed the
+  silent RAM-check bug** described in the lessons above.
+- **`measure_solver_ram.sh`** — rewritten wholesale. Its old premise (patch a copy
+  of `main.c` to activate the solver, compare dormant vs active) is obsolete. It
+  now builds once and prints the **per-object RAM breakdown, largest first**, with
+  a FITS/OVER verdict and `exit 1` on overflow.
+- **`build_all.ps1`** — dropped the `test_hal_compile` build (4 → 3 binaries,
+  21 tests); added a compile-only `-Werror` build of `brain.c` so the warning
+  guarantee still covers it. (`brain_host.c` cannot be linked there — it needs a
+  generated `_maze_data.h`; `run_brain.py` drives it instead.)
+- **`brain_host.c`** — two new checks (5 → 7): the plans use only `F/L/R/B`, and
+  they fit the firmware's replay buffer.
+- **`parse_telemetry.py`** — `J` line 12 → 15 fields, new `B` line parser, and
+  two new report sections (the brain's view; the bring-up decisions). It prints
+  **`?? CORNER CANDIDATE`** for a junction with exactly one lateral exit plus a
+  forward one — the case where `in.front` may be lying.
+
+#### Verification
+
+- `powershell -File ./scripts/build_all.ps1` → **21 tests, 0 failed, 0 warnings**
+  (test_graph 6, test_robot 7, integration_test 8) + `brain.o` compile-only clean.
+- `python scripts/run_brain.py <maze>` → **7/7 on all five mazes.** On
+  `real_field`: home `BR`, fast `BFFLRLF`, fast time **6.50 s = the time-optimal
+  cost of the full maze** — a maze the brain was never allowed to see.
+- `bash scripts/measure_solver_ram.sh` → **FITS**, 1360 B free.
+- The firmware builds, links and fits on the real **ARMCC 5**.
+
+#### Not done, deliberately
+
+On-target bring-up. Nothing in this repo can check the brain's *model* against
+the physical robot, because `brain_host.c` drives the brain from a model of the
+robot — a wrong model is invisible to it. Flash the `USE_TELEMETRY=1` build, press
+KEY1, and read the report. The first thing to look at is `in.front` at a corner;
+then `drift_cm`, which should snap to whole cells with a residue that does not
+grow.
+
+---
 
 ### 2026-09-23 — The two junction-input questions are answered: inherit the gate, use centre-on-line for `front`
 

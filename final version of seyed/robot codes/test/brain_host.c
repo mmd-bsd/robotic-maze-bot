@@ -388,6 +388,57 @@ done:
                 "proof let it stop too early");
     }
 
+    /* ---- 5. can the FIRMWARE execute these strings? -----------------
+     *
+     * The brain's alphabet and the firmware's replay alphabet are not the
+     * same thing, and nothing above this line would notice the difference:
+     * the host replays understand every command the brain emits, so a plan
+     * the robot cannot follow still "passes" checks 3 and 4.
+     *
+     * That is not hypothetical.  The legacy replay stages dispatched only
+     * 'L'/'R'/'S'/'D' -- no 'F' and, fatally, no 'B' -- while the brain emits
+     * 'F' and emits 'B' on any reversal (the real field's fast path is
+     * BFFLRLF).  A 'B' would have fallen through every branch and the robot
+     * would have sat at the junction until someone noticed.  The stages now
+     * have all four cases (main.c replay_dispatch()), and this check is what
+     * pins that down: it holds the brain to exactly the four letters the
+     * firmware implements. */
+
+    T("Both plans use only F/L/R/B (the firmware's replay alphabet)");
+    {
+        const char* plans[2];
+        const char* names[2];
+        int         bad = 0;
+        int         i, k;
+
+        plans[0] = home; names[0] = "home";
+        plans[1] = fast; names[1] = "fast";
+
+        for (k = 0; k < 2; k++) {
+            for (i = 0; plans[k][i]; i++) {
+                char c = plans[k][i];
+                if (c != 'F' && c != 'L' && c != 'R' && c != 'B') {
+                    printf("\n      %s path has '%c' (0x%02X) at index %d",
+                           names[k], c, (unsigned char)c, i);
+                    bad = 1;
+                }
+            }
+        }
+        if (!bad) OK(); else NO("a command the firmware cannot replay");
+    }
+
+    /* The 'D' terminator set_plan() appends needs one spare byte, and a plan
+     * longer than the firmware's replay buffer would be silently truncated. */
+    T("Both plans fit the firmware's replay buffer");
+    {
+        size_t h = strlen(home), f = strlen(fast);
+        printf("\n      home %zu + sentinel, fast %zu + sentinel, buffer 200   ",
+               h, f);
+        if (h + 1 < 200 && f + 1 < 200) OK();
+        else NO("a plan would be truncated by set_plan()");
+    }
+
     printf("\n%d/%d checks passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
 }
+

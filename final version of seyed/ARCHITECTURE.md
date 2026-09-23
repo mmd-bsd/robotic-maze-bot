@@ -32,11 +32,15 @@ cautious speed**, then on the **fast run** it accelerates on clear straights and
 one. See `ALGORITHMS.md` → §6. The exploration **early-stop proof is time-based
 too** (same `v_max`), so it never prunes a straight branch that could be faster.
 
-The project has **two parts**:
+The project has **three parts**:
 
 1. **Simulator** (Python) — design mazes and visualize/verify the algorithm.
-2. **Real robot code** (STM32 / C) — the firmware that runs on hardware (future
-   "final version"; earlier iterations exist under `New Start/` and `old docs/`).
+2. **C maze-solving library** (`robot codes/`) — a portable, host-testable port of
+   the same algorithm, plus the decision core (`brain.c`).
+3. **STM32 firmware** (`firmware/`) — the robot. It owns all sensing and motion;
+   it calls `brain_step()` at each junction and replays the two plans the brain
+   returns. Earlier iterations exist under `New Start/` and `old docs/`
+   (read-only history).
 
 ---
 
@@ -54,11 +58,14 @@ SEYED/
 │   │       ├── sample_maze.json     27-node demo maze (ported from sim_V12)
 │   │       └── sample_maze2.json    larger demo with a far branch (tests pruning)
 │   ├── robot codes/                  C maze solver port for STM32 firmware
-│   │   ├── inc/                      headers (types, config, modules, HAL, brain)
+│   │   ├── inc/                      headers (types, config, modules, brain)
 │   │   ├── src/                      implementations (graph, robot, FSM, brain, …)
-│   │   ├── test/                     unit + integration tests (31 tests)
+│   │   ├── test/                     unit + integration tests (21 tests)
 │   │   ├── scripts/                  build_all.ps1, run_maze.py, run_brain.py, …
 │   │   └── STATUS.md                 module status, build commands, design notes
+│   ├── firmware/                     STM32G031 firmware (the robot)
+│   │   ├── Core/Src/main.c           superloop, motion, and the brain seam
+│   │   └── MDK-ARM/                  Keil project (ARM Compiler 5)
 │   ├── ARCHITECTURE.md              <-- this file
 │   ├── ALGORITHMS.md                algorithm + command-generation reference
 │   └── CHANGELOG.md                 running worklog/history (keep it updated)
@@ -278,6 +285,10 @@ These are hard-won; keep them in mind before changing the simulator.
   Open: calibrate `v_max` / `a_max` / per-turn caps from real encoder/IMU data
   (turns are currently modelled as a full stop).
 - **Real-robot firmware** — the C solver library in `robot codes/` implements the
-  full exploration + proof + fast-run algorithm.  Next step: cross-compile for
-  STM32 and integrate with `New Start/code/Core/Src/main.c` via `USE_MAZE_SOLVER`.
-  The `New Start/` tree holds earlier C prototypes (read-only reference).
+  full exploration + proof + fast-run algorithm, and the decision core (`brain.c`)
+  is **already wired into `firmware/Core/Src/main.c`**: the brain builds the two
+  plan strings, and the firmware's own replay stages drive them.  The legacy
+  left-hand-rule explorer was deleted outright (2026-09-23), which is what freed
+  the RAM — see `robot codes/STATUS.md`.  Remaining: on-target bring-up and
+  encoder calibration.  The `New Start/` tree holds earlier C prototypes
+  (read-only reference).

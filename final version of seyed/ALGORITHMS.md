@@ -180,6 +180,15 @@ When exploration finishes (no useful frontier), the robot navigates back to
 predecessor tree from the current node. Each step still emits a command, so the
 "return" is part of the animated command stream.
 
+**This is a shortest path, not a retrace.** The homeward route may leave the
+outward route by a different branch, so it is *not* the outward command stream
+reversed — and the robot does not reverse its heading to drive it. On the
+firmware this matters: the legacy replay stage flipped the robot's heading on
+entry because its home string *was* a retrace with the rear sensor bank leading.
+That flip is removed (`firmware/Core/Src/main.c`, 2026-09-23). The plan the
+brain returns assumes the robot's **current** heading, so it can be executed
+straight away with no reorientation.
+
 ---
 
 ## 4. Fastest path (metric: TIME, acceleration-aware)
@@ -201,6 +210,11 @@ stands out. The phase ends in **DONE**.
 > `v_max`, so the returned route is provably time-optimal over the *whole* maze,
 > not just the discovered part — whether it stopped early (`proven_optimal`) or
 > mapped everything (`fully_explored`).
+
+The fast-run plan is emitted as a second string, and it **assumes the heading
+the robot has once it has finished the home run** — the two strings are one
+continuous stream, not two independent ones. On the firmware that is why the
+fast-run replay stage does *not* re-initialise the robot's heading either.
 
 ---
 
@@ -233,6 +247,36 @@ With **Y up**, a left turn from NORTH `(0,1)` goes WEST `(-1,0)`:
 Every move (explore, backtrack, return-home, and fast-run) appends a record
 `{from, to, cmd, heading}` to the command log. This stream is exactly what the
 real robot firmware will consume.
+
+### 5.1 One command is one STOP, not one graph edge
+
+The firmware executes a plan as a sequence of decisions at junctions, and the
+robot only *stops* at a junction it has to decide at. A plan command therefore
+does not mean "move to the next node" — it means **"turn as told, then drive
+until you reach somewhere you would stop"**, and it can carry the robot several
+cells.
+
+This is not a detail. A naive port that emits one character per graph edge
+produces a plan the robot cannot execute: it turns at the first junction it
+happens to reach, which is often a straight passthrough the plan never intended
+to stop at. The command-granularity reduction in `brain.c` collapses each
+straight run to its first command, and `brain_host.c`'s replayer does the same
+(`drive_until_stop`) so that the test and the robot agree.
+
+The junction test that defines "somewhere you would stop" is the firmware's own:
+
+```
+left_poss  = s[2] && (s[3] || s[4] || s[5] || s[6])
+right_poss = s[7] && (s[3] || s[4] || s[5] || s[6])
+dead end   = centre group all off, held for head_delay >= 50 ticks
+stop       = left_poss || right_poss || dead end      (target disc: always)
+```
+
+The `&& centre-on-line` guard is load-bearing: a side sensor only counts as a
+branch while the bar is still on the line, so a node with only a forward exit is
+a passthrough — no side sensor fires and the centre never goes dark — and the
+robot drives through without reporting. A dead end is the opposite: the centre
+*does* go dark, so it always stops. See `robot codes/SENSORS.md` §2.
 
 ---
 
