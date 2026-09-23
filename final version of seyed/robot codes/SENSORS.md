@@ -78,10 +78,27 @@ Taken from the junction decision at `main.c:1366-1407`, which is the only place 
 gives the sensors meaning. The same pattern repeats for the rear bank when
 `head == 1`.
 
-| Index | Lateral offset | Front | Rear | Role |
+| Index | Position | Front | Rear | Role |
 |---|---|---|---|---|
-| — | −4.5 pitch | `s[0]` | — | outer extreme; used only paired with `s[9]` |
-| — | +4.5 pitch | `s[9]` | — | outer extreme; used only paired with `s[0]` |
+| — | **on the rotation axis, robot centre** | `s[0]` | — | centre-of-node detector; paired with `s[9]` |
+| — | **on the rotation axis, robot centre** | `s[9]` | — | centre-of-node detector; paired with `s[0]` |
+
+> **CORRECTION — an earlier revision of this file placed `s[0]`/`s[9]` at ±4.5 pitch,
+> i.e. the outer extremes of the front row. That was wrong.** Measured on the board
+> by the user: both sit **in the middle of the robot, on the axis of rotation**. They
+> are the two direct-ADC pads (`adcv[2]` and `adcv[0]`), which is why they are wired
+> separately from the MUX and why they break the `i ≡ S<i>` numbering.
+>
+> That makes `s[0] && s[9]` a **position gate, not a "black on both sides" gate**: it
+> fires when the robot's rotation axis is over the node, i.e. **"you have arrived,
+> decide now."** It is satisfied at every node type — crossing, T, corner — not only
+> at a 4-way. Everything below that was derived by placing them at the extremes is
+> withdrawn; see the note under §2.
+>
+> **Open:** whether the pair is ANDed or ORed is not yet established. `&&` is what
+> the source reads at `main.c:1372`/`1378`, but `cross` also has stale-value
+> behaviour that could mask an OR. The `J` telemetry lines settle it — they carry the
+> raw `front` mask, so the two bits can be read directly against `cross`.
 | a | −3.5 pitch | `s[1]` | `s[10]` | **target detector** (part of the all-black row test) |
 | b | −2.5 pitch | `s[2]` | `s[11]` | **left branch detector** |
 | c | −1.5 pitch | `s[3]` | `s[12]` | on-line, centre group |
@@ -134,179 +151,29 @@ Dead end is the mirror image — centre group all off, held for `head_delay >= 5
 else if (s[3]==0 && s[4]==0 && s[5]==0 && s[6]==0 && head_delay >= 50) { cross = 4; }
 ```
 
-### The `s[0] && s[9]` gate — and what it costs
+### The `s[0] && s[9]` gate — the "you are at the node" signal
 
-The decision block is gated on the two outer front sensors, the outermost pair:
-**±45.9 mm** at the 10.2 mm pitch, so a **91.8 mm** span.
+The decision block is gated on the pair `s[0] && s[9]`, which sit on the robot's
+rotation axis (see the correction in §2). So the gate means **"the rotation axis is
+over the node"** — it is the firmware's *arrival* test, not a test of which branches
+exist. `left_poss`/`right_poss` say what the branches are; the gate says when to act
+on them.
 
-```c
-if (right_poss || left_poss)
-{
-    if (left_poss && (s[0] && s[9]))                     { cross=1; path_append('L'); }  /* 1372 */
-    else if (left_poss==0 && right_poss==1 && s[9] && s[0]) { ... }                      /* 1378 */
-}
-```
+Read that way the block is a clean left-hand rule, and the fall-through is the
+"not there yet" case rather than an unhandled one:
 
-A **one-sided** branch cannot satisfy `s[0] && s[9]`: a branch to the left puts black
-left of the bar, not at +45.9 mm. So at a T-junction, and at a corner, the gate is
-false, no `cross` is chosen, and control falls through to `Forward()` **with no
-`path_append()`** — that branch is never recorded. `cross` works by staying stale at
-0, which is why the `Forward()` at 1412 reads as "no decision" as well as "straight".
-
-That is *correct for the left-hand rule*: at a T with forward open, going straight is
-the left-hand-rule answer and the gate is what stops the robot turning. It is not a
-bug in the legacy explorer. It **is** the wrong junction test for the brain, which
-needs every real junction reported or it will never learn that branch — see the
-integration notes in `inc/brain.h`.
-
-**The implication, worked out from the pitch geometry.** Sampling the bar at the
-node centreline, the black under `s[0]`..`s[9]` is, per node type (robot travelling
-north, line 20 mm wide, offsets from SENSORS.md §3):
-
-| node type | black at the bar | `left_poss` | `right_poss` | `s[0]&&s[9]` |
+| at the node, gate true | `left_poss` | `right_poss` | centre | result |
 |---|---|---|---|---|
-| straight `N+S` | `\|x\| <= 10` | 0 | 0 | no |
-| corner `S+W` | `x <= 10` | 1 | 0 | **no** |
-| T `S+N+W` | `x <= 10` | 1 | 0 | **no** |
-| T `S+N+E` | `x >= -10` | 0 | 1 | **no** |
-| 4-way | everything | 1 | 1 | **yes** |
+| crossing | 1 | 1 | on | `'L'` — left, priority 1 |
+| T, branch left | 1 | 0 | on | `'L'` |
+| T, branch right | 0 | 1 | on | `'S'` — left blocked, straight is next |
+| corner | 1 | 0 | on | `'L'` |
+| dead end | 0 | 0 | off | `'B'` — after `head_delay >= 50` |
+| *not at the node* | — | — | — | `Forward()`, nothing recorded |
 
-So during discovery the gate passes **only at a 4-way**, where `left_poss &&
-(s[0]&&s[9])` gives `'L'` — and the only other report is `'B'` at a dead end.
-`'S'` needs `left_poss==0`, and `'R'` needs the centre group *off* the line; neither
-can happen at a 4-way. **The legacy explorer therefore turns only at 4-ways, goes
-straight at every T, and records nothing at either.** That is a coherent
-left-hand-rule walk — the branch it declines to take is one the rule has already
-decided against — and it is why the recorded map is a walk, not a map.
+An earlier revision of this file concluded from pitch arithmetic that the gate could
+only pass at a 4-way, and that the legacy explorer silently skipped one-sided
+branches. **That conclusion is withdrawn** — it rested entirely on the wrong positions
+for `s[0]`/`s[9]`. With the pair on the rotation axis there is no such restriction.
 
-This is derived from the geometry, not observed. It is checkable in one capture:
-count the `J` lines and compare `cross` against the `front` mask on each.
-
-**And it has a consequence for the legacy map.** `nav` — the firmware's heading, and
-the axis `node[]` is accumulated along — is updated **only by explicit turns**:
-
-| primitive | `nav` | line |
-|---|---|---|
-| `turn_left()` / `turn_left_r()` | `nav++` | 614 / 652 |
-| `turn_right()` / `turn_right_r()` | `nav--` | 686 / 723 |
-| U-turn (`cross==4`) | `nav+=2` | 1434 / 1520 |
-| `Forward()` / `Forward_r()` | **untouched** | 613 / 651 |
-
-(`nav` is 0=N, 1=W, 2=S, 3=E — `main.c:80` — identical to `MazeHeading`.)
-
-So a turn the robot takes **without** passing the gate — line-following round a
-corner — leaves `nav` stale, and `node[i+1] = node[i] ± link[i][0]` (`main.c:1550-1553`)
-accumulates that error for the rest of the mission.
-
-Worth measuring rather than asserting: every `J` line carries `nav`, so one capture
-shows directly whether `nav` advances by 1 per real 90° turn. Either way it does **not**
-affect the solver — the brain keeps its own heading and updates it from the moves it
-issued, never from `nav`.
-
-### What this means for the solver
-
-The HAL is already structurally safe here, which is worth recording so nobody
-"fixes" it: it does **not** index the sensor array itself for branch decisions. It
-reads the firmware's latched `left_poss` / `right_poss` flags
-(`maze_hal.h:148-151`), so it inherits the firmware's branch logic exactly and cannot
-disagree with it about which sensor is which. The only raw indices it touches are the
-centre groups `s[3]`…`s[6]` and `s[12]`…`s[15]` (`maze_hal.h:141-144`), which are
-correct under either bank split — so the 10/8 correction above changes no code.
-
-**Do not add raw index reads for branch detection.** `s[0]`, `s[1]`, `s[8]` and
-`s[9]` are not branch detectors — feeding them to the graph would sprout phantom
-edges at every node. This is also the reason for the "read sensors *before* the
-motion primitive" rule in the integration contract: `turn_left()` clears
-`left_poss`/`right_poss` itself (`main.c:602-603`, `640-641`, `674-675`, `710-711`),
-so a read taken after the call sees zeros.
-
----
-
-## 3. Measured geometry
-
-Supplied by the user, measured on the real board:
-
-| Measurement | Value | Implies |
-|---|---|---|
-| `s[2]` → `s[7]` centre-to-centre | **51 mm** | active array is 6 sensors on **5 gaps** → **pitch = 10.2 mm** |
-| `s[1]` → `s[17]` centre-to-centre | **76 mm** | see the open question below — `s[17]` is in the *other* bank |
-
-Derived from the 10.2 mm pitch, for the front bank (the rear bank mirrors it at +9):
-
-| Span | Sensors | Width |
-|---|---|---|
-| centre group `s[3]`…`s[6]` | 4 | 30.6 mm |
-| **active array `s[2]`…`s[7]`** | 6 | **51.0 mm** |
-| outer pair `s[1]`…`s[8]` | 8 | 71.4 mm |
-
-So the branch detectors sit **±25.5 mm** either side of the array centreline, and the
-rocker is ±25.5 mm — a branch is only *seen* while the bar is within roughly half a
-line-width of the node. That is the number that sets how much the robot may be
-off-centre when it makes a junction decision.
-
-**Sanity check against the field** (§4): the track is 20 mm wide and the cell is
-200 mm. An active array of 51 mm is 2.5 line-widths — wide enough that 2-3 sensors
-hold the line at once, narrow enough to fit well inside a cell. This geometry is
-consistent; nothing here fights the solver.
-
-### Open question — the second measurement does not fit
-
-`s[17]` is in the *rear* bank, so `s[1]` → `s[17]` is not a same-row span. Checking it
-against the 10.2 mm pitch:
-
-- If it were really `s[1]` → `s[8]` (a typo for the number I asked for), 76 mm over
-  7 gaps gives pitch **10.86 mm** — **6% off** the 10.2 mm from the first
-  measurement. Bigger than caliper error, so it probably is not this.
-- If the two rows run parallel and `s[1]`→`s[17]` is the **diagonal** across them,
-  then `76² = 71.4² + d²` → the rows are **26 mm apart**. Very close — at that
-  separation "front bank" and "rear bank" would barely differ.
-- If the rows are numbered in opposite directions, `s[17]` sits behind `s[1]` and
-  76 mm is the **row separation** directly. But the firmware mirrors the banks at
-  +9 (`s[2]`→`s[11]`, `s[7]`→`s[16]`), which only works if both rows are numbered
-  the same way — so this reading contradicts the code.
-
-The middle reading is the one the arithmetic supports, but it needs confirming before
-anything depends on it.
-
-### Sensor lead: 57 mm from the robot centre to the front sensor line
-
-The bar looks **57 mm ahead of the robot's centre** (assumed to be at/near the drive
-axle — see below). At `v_max` = 100 cm/s the robot covers that in **57 ms**.
-
-Where this does and does not matter:
-
-- **It cancels out of link lengths.** Every junction is detected at the same bar
-  position, so an encoder reading taken junction-to-junction measures exactly the
-  travel between two junctions — the 57 mm is on both ends. This is why the link
-  lengths the firmware reports already look right.
-- **It does not cancel out of the maneuver offsets.** `path_append()` adds
-  `+25/+30/+85/+95/+104` depending on the previous move (`main.c:847`). Those
-  differences exist *because* of this lead: turning takes more or less arc than
-  going straight, and the bar ends up a different distance from the axle each time.
-  The 57 mm is the physical quantity behind those empirical numbers.
-- **It shifts the first node and the target hit.** The start node is where the robot
-  is *placed*, which is a bar position; the target is detected when the bar is over
-  the disc (`end_zone_timer > 2`), 57 mm before the axle arrives.
-- **It is the turn budget in the fast run.** The robot commits to a turn with the bar
-  at the node and completes it over the following 57 mm of travel. A fast run that
-  penalises each turn is therefore right to — the turn is physically "free" distance
-  but not free time.
-
-**Assumption to check:** 57 mm was measured from the *robot centre*. If the drive
-axle is offset from the centre, the number that matters is axle-to-bar. For this
-chassis they should be within a few mm; worth a glance.
-
----
-
-## 4. Field measurements taken from the image
-
-From `robot and field data/field.png` (582 × 458, a flat graphic export — a 7 KB PNG,
-so no photographic distortion; the line positions are exact, not estimates):
-
-- Track width: **6-7 px**
-- Grid pitch: **62.5 px**, and the field is a 20 cm grid → **≈ 3.125 px/cm**
-- Therefore the tracks are **≈ 2.0 cm wide** and the cell is **20 cm** — which matches
-  the grid size already assumed everywhere else in this project
-- Target ("big black area") is a filled disc of radius ≈ 20 px ≈ **6.4 cm**, centred
-  exactly on a grid **intersection** — confirming the field is a *line* maze, where
-  the black lines are the tracks and the disc marks a node on them
+**And it has a consequence for the legacy map.**

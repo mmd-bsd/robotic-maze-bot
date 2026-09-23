@@ -81,11 +81,26 @@
 
 ## History (newest first)
 
-### 2026-09-23 — Reading the real junction logic: the move mapping is 1:1, the gate is not
+### 2026-09-23 — Reading the real junction logic: the move mapping is 1:1, and the gate is a position gate
+
+> **CORRECTION (same day, later).** The section below headed "Not good: the junction
+> gate must be dropped" was **wrong and is withdrawn.** It assumed `s[0]`/`s[9]` sit at
+> the outer extremes of the front row (±45.9 mm apart, a 91.8 mm span). The user
+> corrected this: both sit **in the middle of the robot, on the axis of rotation**. They
+> are an **arrival** test ("my rotation axis is over the node — decide now"), not a
+> "black on both sides" test, and they are satisfied at **every** node type — crossing,
+> T and corner alike. So the gate is *exactly* what the brain wants and can be
+> inherited as-is; a junction is declared on
+> `(s[0] && s[9]) && (left_poss || right_poss || dead-end)`. The withdrawn table, the
+> "91.8 mm" arithmetic, and the claim that the legacy explorer "turns only at 4-ways"
+> all rest on the bad premise. The *good* half of the entry — the 1:1 move mapping and
+> `path_append()` as the call point — is unaffected and stands. See SENSORS.md §2 for
+> the corrected geometry.
 
 Read `firmware/Core/Src/main.c:1353-1525` (the real discovery block) against the
-brain, on the user's instruction to feed the brain from it. Two results, one good
-and one that needs measuring.
+brain, on the user's instruction to feed the brain from it. One result stands, one
+was **withdrawn the same day** after the user corrected the sensor geometry — read
+the correction banner below before the second half.
 
 #### Good: the moves map 1:1, so the integration is nearly free
 
@@ -115,7 +130,14 @@ turn, +25/+30 after a straight, +104 after a 'B') are empirical and must not dri
 `in.target` from `OnEndZoon` (1320). Both are read **before** the motion primitive,
 which clears them (602-603 etc.) — the rule SENSORS.md already records.
 
-#### Not good: the junction gate must be dropped, not inherited
+#### ~~Not good: the junction gate must be dropped, not inherited~~ — WITHDRAWN
+
+> **Everything from here to "The one thing left unresolved" is withdrawn.** It was
+> derived by placing `s[0]`/`s[9]` at the outer extremes of the front row. They are
+> not there — they are on the rotation axis (see the correction banner above). The
+> block is a clean left-hand rule and the gate is a position/arrival test that fires
+> at every node type, so it *can* be inherited. Kept only so the reasoning is not
+> silently lost; do not act on it.
 
 The firmware only ever chooses a turn when **both outer front sensors see line**:
 
@@ -150,6 +172,13 @@ test for the brain**, which needs every real junction reported or it will never 
 a one-sided branch and will claim `fully_explored` with edges missing. The brain must
 declare a junction on `left_poss || right_poss || dead-end`. The gate is part of the
 left-hand-rule logic being *replaced*, not part of reading the sensors.
+
+> **^ Withdrawn** (see the banner). The gate is a position gate on the rotation axis,
+> fires at every node type, and is inherited unchanged. The junction test the brain
+> uses is `(s[0] && s[9]) && (left_poss || right_poss || dead-end)` — which is the
+> firmware's existing structure, not a replacement for it. One sub-question is still
+> open: whether the pair is **ANDed** (as the source reads) or **ORed** (the user is
+> unsure what the hardware does). The M1 capture settles it.
 
 #### The one thing left unresolved: `front`
 
@@ -646,15 +675,16 @@ S5, S4, S3, S6, S7, S1, S8, S2) looks scrambled but exists precisely to make the
 `S` numbers come out in order. Only `s[0]`/`s[9]` break the pattern — they are the
 two pads wired straight to ADC pins instead of through the MUX.
 
-Roles, from the junction decision at `main.c:1202-1214` and the target test at
-`main.c:1167`:
+Roles, from the junction decision at `main.c:1366-1407` (cited as 1202-1214 when
+this entry was written — that region is now commented-out I2C scan code) and the
+target test at `main.c:1167`:
 
 | index | front / rear | lateral | role |
 |---|---|---|---|
 | 2 / 11 | | ±2.5 pitch | **left** branch detector |
 | 3,4,5,6 / 12,13,14,15 | | ±1.5, ±0.5 | on-line centre group |
 | 7 / 16 | | +2.5 pitch | **right** branch detector |
-| 0 / 9 | | −4.5 / +4.5 | used only as a *pair* (`s[0] && s[9]`) to promote a junction to a crossroads |
+| 0 / 9 | | **on the axis** | ~~−4.5 / +4.5~~ — **corrected: both sit in the middle of the robot, on the rotation axis** (user-measured). They are the arrival/position pair (`s[0] && s[9]` = "my axis is over the node"), not outer extremes. See SENSORS.md §2 and the 2026-09-23 correction banner. |
 | 1,8 / 10,17 | | ∓3.5 pitch | **target detectors** (half the all-black row test) — not branch detectors |
 
 **The banks are not the same size** — front is `s[0]`…`s[9]` (10) and rear is
@@ -1112,20 +1142,23 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 - **Bring-up mode chosen:** the brain runs in firmware and prints each decision
   over Bluetooth, waits ~5 s, then executes. Supervised, one node at a time —
   see `New Start/` for the firmware's existing Bluetooth UART debug path.
-- **Two firmware questions the M1 capture settles** (both derived from the pitch
-  geometry, neither observed — see the 2026-09-23 "Reading the real junction logic"
-  entry, and `inc/brain.h` for the integration notes):
-  1. The legacy junction gate `s[0] && s[9]` passes only when a line crosses on
-     **both** sides. A one-sided branch cannot satisfy it, so the legacy explorer
-     turns only at 4-ways. **This gate must NOT be inherited** — the brain declares
-     a junction on `left_poss || right_poss || dead-end`, or it will never learn a
-     one-sided branch and will claim `fully_explored` with edges missing.
-  2. `front` = `centre-on-line` is the firmware's proxy and is **wrong at a corner**
-     (the corner's own arm is under the centre). That matters because `Forward()` is
-     the *line follower*, so a robot told 'F' at a corner steers round it while the
-     brain believes it went straight, and the dead reckoning diverges.
+- **Two firmware questions the M1 capture settles** (neither observed on hardware —
+  see the 2026-09-23 "Reading the real junction logic" entry, and `inc/brain.h` for
+  the integration notes):
+  1. Is the junction gate `s[0] && s[9]` (main.c:1372, 1378) an **AND or an OR**?
+     The source reads `&&`, but the user is not certain that is what the hardware
+     actually does. The pair sits on the rotation axis and is the arrival test, so
+     either way it fires at every node type — but which one it is decides how wide
+     the "you are at the node" window is, i.e. how much the robot can overshoot
+     before it stops.
+  2. `front` = `centre-on-line` is the firmware's proxy and may be **wrong at a
+     corner** (the corner's own arm is under the centre). That matters because
+     `Forward()` is the *line follower*, so a robot told 'F' at a corner steers
+     round it while the brain believes it went straight, and the dead reckoning
+     diverges.
   The `J` telemetry lines carry the raw `front`/`rear` sensor masks as hex plus
   `L`,`R`,`cross`, so one capture turns both into measurements.
 - **The brain has never run on hardware.** Everything above is host-validated
   against a *model* of the firmware's junction detector (`brain_host.c` mirrors
-  `main.c:1202-1214`). The first on-robot run is what tests that model.
+  the front-bank block at `main.c:1366-1407`). The first on-robot run is what tests
+  that model.

@@ -132,36 +132,47 @@ typedef struct {
  * must not drift apart.  The brain needs it BEFORE the decision, `path_append()`
  * records it AFTER — same number, computed once.
  *
- * TWO THINGS THIS CODE CANNOT TELL YOU — CONFIRM BEFORE TRUSTING IT
+ * THE JUNCTION GATE IS A POSITION GATE, AND IT CAN BE INHERITED
  *
- * (1) THE JUNCTION GATE `s[0] && s[9]` (main.c:1372, 1378) MUST NOT BE
- *     INHERITED.  Today the firmware only ever *turns* when both outer front
- *     sensors see line — i.e. only when a line crosses the bar on BOTH sides.
- *     At the 10.2 mm pitch that is a 91.8 mm span (SENSORS.md §3), so a branch
- *     on one side only cannot satisfy it.  That is correct for the left-hand
- *     rule (at a T with forward open, going straight IS right, and the gate
- *     stops it turning) — but it is wrong for the brain, which needs every real
- *     junction reported or it will never learn that branch and will claim
- *     `fully_explored` with edges missing.  Declare a junction on
- *     `left_poss || right_poss || dead-end` instead.  Note the gate is part of
- *     the left-hand-rule logic being replaced, not part of reading the sensors.
+ * `s[0] && s[9]` (main.c:1372, 1378) reads like a "black on both sides" test, and
+ * an earlier revision of this file wrongly treated it as one.  It is not:
+ * `s[0]` and `s[9]` sit in the middle of the robot ON THE AXIS OF ROTATION
+ * (measured; see SENSORS.md §2).  So the gate means "my rotation axis is over
+ * the node" — the firmware's arrival test, not a test of which branches exist.
  *
- * (2) `front` IS NOT SIMPLY `s[3]||s[4]||s[5]||s[6]`.  The firmware uses
- *     centre-on-line as its proxy for "forward is open" (main.c:1380) and it is
- *     right at a true crossing and at a T.  At a CORNER it is wrong: the
- *     corner's own arm is under the centre, so the proxy reads "forward open"
- *     where there is no forward.  A robot that believes `front` there drives off
- *     the line.  This needs real sensor data to settle — see below.
+ * Read that way the block is a clean left-hand rule and the gate is exactly what
+ * the brain wants: `left_poss`/`right_poss` say what the branches are, the gate
+ * says when to act.  A junction is therefore declared on
  *
- * WHAT SETTLES BOTH: the M1 telemetry build already logs every junction the
- * robot actually stops at, with the raw sensor masks AND the flags:
+ *     (s[0] && s[9])  &&  (left_poss || right_poss || dead-end)
+ *
+ * and a node with no lateral is a straight passthrough driven through with no
+ * report — which is what the brain already assumes, and reconstructs from
+ * `dist_cm`.  Gate and brain agree; inherit it.
+ *
+ * ONE THING LEFT UNRESOLVED: `front`
+ *
+ * `in.front` is the one field with no clean source.  The firmware's proxy is
+ * centre-on-line (main.c:1380) and it is only consulted in the one branch where
+ * `right_poss==1 && left_poss==0`, to choose straight over right.  That is a
+ * meaningful choice at a T with forward open — but at a corner it would be the
+ * wrong answer, and the proxy cannot tell the two apart from the centre group
+ * alone.
+ *
+ * It matters more than it looks, because `Forward()` is not "drive straight" —
+ * it is the LINE FOLLOWER.  A robot told 'F' at a corner steers around it while
+ * the brain believes it went straight, and the dead reckoning diverges.  This is
+ * the one input that needs real sensor data.
+ *
+ * WHAT SETTLES IT: the M1 telemetry build already logs every junction the robot
+ * actually stops at, with the raw sensor masks AND the flags:
  *
  *     J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>
  *
  * `<front>`/`<rear>` are the sensor masks as hex, so the bar's black pattern at
  * every real junction is recoverable, and `<L>`,`<R>`,`<cross>` say what the
- * legacy logic concluded from it.  That one capture is what turns (1) and (2)
- * from reading into measurement.
+ * legacy logic concluded from it.  That one capture turns `front` from reading
+ * into measurement — and it also settles whether `s[0]`/`s[9]` are ANDed or ORed.
  *============================================================================*/
 
 /** Returned by brain_step() when exploration is provably complete.  Query
