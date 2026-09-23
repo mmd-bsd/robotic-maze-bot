@@ -81,6 +81,43 @@
 
 ## History (newest first)
 
+### 2026-09-23 — The two junction-input questions are answered: inherit the gate, use centre-on-line for `front`
+
+The two inputs `BrainIn` could not be derived from source alone are now decided
+by the user, and `inc/brain.h` records them as settled rather than open.
+
+| input | source | decision |
+|---|---|---|
+| junction gate | `s[0] && s[9]`, main.c:1372/1378 | **inherit as written** — anded, as the source reads |
+| `front` | centre group `s[3]`…`s[6]`, main.c:1380 | **`in.front = (s[3]\|\|s[4]\|\|s[5]\|\|s[6])`** |
+
+So the junction declaration the integration writes is the firmware's own
+structure, not a replacement for it:
+
+```c
+(at node)  = s[0] && s[9];
+(junction) = (at node) && (left_poss || right_poss || dead_end);
+in.front   = (s[3] || s[4] || s[5] || s[6]);
+```
+
+**`front` is still worth measuring.** The proxy is unambiguous at a crossing and
+at a T, but at a **corner** it may read "forward open" where there is no forward —
+if the incoming arm is still under the centre group when the robot stops. That
+matters because `Forward()` is the *line follower*, not "drive straight": a robot
+told `'F'` at a corner steers round it while the brain believes it went straight,
+and the dead reckoning diverges from there.
+
+The check is one M1 capture at a known corner — the `J` line carries the raw
+`front` mask as hex, so the answer is readable rather than argued. **Not settled
+by more geometry**: the previous day's attempt to derive sensor behaviour from a
+diagram produced a confidently wrong conclusion (see the entry below), and that
+is the lesson being applied. If the corner does lie, the fix is that one
+expression at the integration site — the brain is unaffected.
+
+No code change; `brain_host` still 5/5 on all five mazes.
+
+---
+
 ### 2026-09-23 — Reading the real junction logic: the move mapping is 1:1, and the gate is a position gate
 
 > **CORRECTION (same day, later).** The section below headed "Not good: the junction
@@ -1142,22 +1179,18 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 - **Bring-up mode chosen:** the brain runs in firmware and prints each decision
   over Bluetooth, waits ~5 s, then executes. Supervised, one node at a time —
   see `New Start/` for the firmware's existing Bluetooth UART debug path.
-- **Two firmware questions the M1 capture settles** (neither observed on hardware —
-  see the 2026-09-23 "Reading the real junction logic" entry, and `inc/brain.h` for
-  the integration notes):
-  1. Is the junction gate `s[0] && s[9]` (main.c:1372, 1378) an **AND or an OR**?
-     The source reads `&&`, but the user is not certain that is what the hardware
-     actually does. The pair sits on the rotation axis and is the arrival test, so
-     either way it fires at every node type — but which one it is decides how wide
-     the "you are at the node" window is, i.e. how much the robot can overshoot
-     before it stops.
-  2. `front` = `centre-on-line` is the firmware's proxy and may be **wrong at a
-     corner** (the corner's own arm is under the centre). That matters because
-     `Forward()` is the *line follower*, so a robot told 'F' at a corner steers
-     round it while the brain believes it went straight, and the dead reckoning
-     diverges.
+- **Two firmware questions, both now decided — the M1 capture only checks the
+  second** (see the 2026-09-23 "Reading the real junction logic" entry, and
+  `inc/brain.h` for the integration notes):
+  1. ~~Is the junction gate `s[0] && s[9]` an AND or an OR?~~ **DECIDED
+     (2026-09-23): inherit it AS WRITTEN — `&&`, per main.c:1372/1378.**
+  2. ~~`front` = `centre-on-line` may be wrong at a corner.~~ **DECIDED
+     (2026-09-23): use it — `in.front = s[3]||s[4]||s[5]||s[6]`.** The residual
+     corner doubt is settled by measurement, not geometry: one M1 capture at a
+     known corner reads the raw mask and confirms or refutes it. If it lies, the
+     fix is that one expression in the integration, not in the brain.
   The `J` telemetry lines carry the raw `front`/`rear` sensor masks as hex plus
-  `L`,`R`,`cross`, so one capture turns both into measurements.
+  `L`,`R`,`cross`, so one capture turns the remaining doubt into a measurement.
 - **The brain has never run on hardware.** Everything above is host-validated
   against a *model* of the firmware's junction detector (`brain_host.c` mirrors
   the front-bank block at `main.c:1366-1407`). The first on-robot run is what tests

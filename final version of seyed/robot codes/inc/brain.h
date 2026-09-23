@@ -116,7 +116,7 @@ typedef struct {
  *
  *     in.left    = left_poss;      -- main.c:1366  s[2] && (s[3]||s[4]||s[5]||s[6])
  *     in.right   = right_poss;     -- main.c:1367  s[7] && (s[3]||s[4]||s[5]||s[6])
- *     in.front   = ???             -- see (2) below
+ *     in.front   = (s[3]||s[4]||s[5]||s[6]);   -- centre on line, main.c:1380
  *     in.back    = 1;
  *     in.target  = OnEndZoon;      -- main.c:1320, the all-black row test
  *     in.dist_cm = <the link just closed, in cm>;
@@ -150,29 +150,39 @@ typedef struct {
  * report — which is what the brain already assumes, and reconstructs from
  * `dist_cm`.  Gate and brain agree; inherit it.
  *
- * ONE THING LEFT UNRESOLVED: `front`
+ * `front` — DECIDED: CENTRE ON LINE
  *
- * `in.front` is the one field with no clean source.  The firmware's proxy is
- * centre-on-line (main.c:1380) and it is only consulted in the one branch where
- * `right_poss==1 && left_poss==0`, to choose straight over right.  That is a
- * meaningful choice at a T with forward open — but at a corner it would be the
- * wrong answer, and the proxy cannot tell the two apart from the centre group
- * alone.
+ * `in.front` is the one field the firmware never computes as such — it is
+ * consulted only in the single branch where `right_poss==1 && left_poss==0`, to
+ * choose straight over right (main.c:1380).  The brain needs it always, as a map
+ * fact: a phantom `front` invents a corridor that does not exist, and the route
+ * the brain later calls fastest can then run through a wall.
  *
- * It matters more than it looks, because `Forward()` is not "drive straight" —
- * it is the LINE FOLLOWER.  A robot told 'F' at a corner steers around it while
- * the brain believes it went straight, and the dead reckoning diverges.  This is
- * the one input that needs real sensor data.
+ * The rule chosen (user, 2026-09-23) is the firmware's own proxy:
  *
- * WHAT SETTLES IT: the M1 telemetry build already logs every junction the robot
+ *     in.front = (s[3] || s[4] || s[5] || s[6]);
+ *
+ * Unambiguous at a crossing and at a T.  The residual doubt is the CORNER: if
+ * the robot's own incoming arm is still under the centre group when it stops,
+ * this reads "forward open" where there is no forward — and it matters more than
+ * it looks, because `Forward()` is not "drive straight", it is the LINE
+ * FOLLOWER, so a robot told 'F' there steers round the corner while the brain
+ * believes it went straight and the dead reckoning diverges.
+ *
+ * That doubt is to be settled by MEASUREMENT, not by more geometry — see below.
+ * If a corner ever does lie, the fix is local to this one expression.
+ *
+ * WHAT MEASURES IT: the M1 telemetry build logs every junction the robot
  * actually stops at, with the raw sensor masks AND the flags:
  *
  *     J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>
  *
  * `<front>`/`<rear>` are the sensor masks as hex, so the bar's black pattern at
  * every real junction is recoverable, and `<L>`,`<R>`,`<cross>` say what the
- * legacy logic concluded from it.  That one capture turns `front` from reading
- * into measurement — and it also settles whether `s[0]`/`s[9]` are ANDed or ORed.
+ * legacy logic concluded from it.  One capture at a known corner is the check.
+ *
+ * Gate, for the record: `s[0] && s[9]` is inherited AS WRITTEN (user,
+ * 2026-09-23) — anded, per main.c:1372/1378.
  *============================================================================*/
 
 /** Returned by brain_step() when exploration is provably complete.  Query
