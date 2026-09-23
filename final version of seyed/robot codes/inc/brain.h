@@ -86,7 +86,82 @@ typedef struct {
 } BrainIn;
 
 /*============================================================================
- * OUTPUT
+ * HOW TO FEED IT FROM THE FIRMWARE
+ *
+ * Read from `firmware/Core/Src/main.c`.  Line numbers are for the copy in this
+ * repo; SENSORS.md's citation of "main.c:1202-1214" is stale — that region is
+ * now commented-out I2C scan code, and the junction decision lives at 1366-1407
+ * (front bank) / 1442-1490 (rear bank).
+ *
+ * THE MOVE MAPPING IS 1:1 — nothing between the decision and the motors changes.
+ * The firmware already has exactly these four actions, selected by `cross`:
+ *
+ *     brain    firmware `cross`   action            dispatch at
+ *     'F'      0                  Forward()/_r()    1362
+ *     'L'      1                  turn_left()/_r()  1367
+ *     'R'      2                  turn_right()/_r() 1372
+ *     'B'      4                  head flip, nav+=2 1389
+ *
+ * So the integration is: replace the *choice* of `cross`, keep everything after
+ * it.  `turn_left()`/`turn_right()` also clear `left_poss`/`right_poss`
+ * themselves (main.c:602-603, 640-641), which is why the exits must be read
+ * BEFORE the motion primitive — the same rule SENSORS.md already records.
+ *
+ * CALL POINT: `path_append()` (main.c:939) is the single choke point that all
+ * eight junction decisions pass through, and it is where the link length is
+ * recorded.  The brain must be invoked just BEFORE the decision, because it
+ * needs `dist_cm` to place the node.
+ *
+ * BUILDING BrainIn FROM THE GLOBALS
+ *
+ *     in.left    = left_poss;      -- main.c:1366  s[2] && (s[3]||s[4]||s[5]||s[6])
+ *     in.right   = right_poss;     -- main.c:1367  s[7] && (s[3]||s[4]||s[5]||s[6])
+ *     in.front   = ???             -- see (2) below
+ *     in.back    = 1;
+ *     in.target  = OnEndZoon;      -- main.c:1320, the all-black row test
+ *     in.dist_cm = <the link just closed, in cm>;
+ *
+ * Rear bank (`head == 1`): the same, with `s[11]` / `s[12..15]` / `s[16]`.
+ *
+ * `in.dist_cm` is the firmware's own link length — the encoder delta since the
+ * `on_link==0 → ResetEncoder` at the top of the link (main.c:1359-1364), run
+ * through the same /(2.467*2) and the same per-command correction that
+ * `path_append()` applies (main.c:951-972: +85/+95 after a turn, +25/+30 after a
+ * straight, +104 after a 'B').  Factor that arithmetic into one helper called
+ * from both places rather than duplicating it: the corrections are empirical and
+ * must not drift apart.  The brain needs it BEFORE the decision, `path_append()`
+ * records it AFTER — same number, computed once.
+ *
+ * TWO THINGS THIS CODE CANNOT TELL YOU — CONFIRM BEFORE TRUSTING IT
+ *
+ * (1) THE JUNCTION GATE `s[0] && s[9]` (main.c:1372, 1378) MUST NOT BE
+ *     INHERITED.  Today the firmware only ever *turns* when both outer front
+ *     sensors see line — i.e. only when a line crosses the bar on BOTH sides.
+ *     At the 10.2 mm pitch that is a 91.8 mm span (SENSORS.md §3), so a branch
+ *     on one side only cannot satisfy it.  That is correct for the left-hand
+ *     rule (at a T with forward open, going straight IS right, and the gate
+ *     stops it turning) — but it is wrong for the brain, which needs every real
+ *     junction reported or it will never learn that branch and will claim
+ *     `fully_explored` with edges missing.  Declare a junction on
+ *     `left_poss || right_poss || dead-end` instead.  Note the gate is part of
+ *     the left-hand-rule logic being replaced, not part of reading the sensors.
+ *
+ * (2) `front` IS NOT SIMPLY `s[3]||s[4]||s[5]||s[6]`.  The firmware uses
+ *     centre-on-line as its proxy for "forward is open" (main.c:1380) and it is
+ *     right at a true crossing and at a T.  At a CORNER it is wrong: the
+ *     corner's own arm is under the centre, so the proxy reads "forward open"
+ *     where there is no forward.  A robot that believes `front` there drives off
+ *     the line.  This needs real sensor data to settle — see below.
+ *
+ * WHAT SETTLES BOTH: the M1 telemetry build already logs every junction the
+ * robot actually stops at, with the raw sensor masks AND the flags:
+ *
+ *     J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>
+ *
+ * `<front>`/`<rear>` are the sensor masks as hex, so the bar's black pattern at
+ * every real junction is recoverable, and `<L>`,`<R>`,`<cross>` say what the
+ * legacy logic concluded from it.  That one capture is what turns (1) and (2)
+ * from reading into measurement.
  *============================================================================*/
 
 /** Returned by brain_step() when exploration is provably complete.  Query

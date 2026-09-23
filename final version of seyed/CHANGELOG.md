@@ -81,6 +81,115 @@
 
 ## History (newest first)
 
+### 2026-09-23 — Reading the real junction logic: the move mapping is 1:1, the gate is not
+
+Read `firmware/Core/Src/main.c:1353-1525` (the real discovery block) against the
+brain, on the user's instruction to feed the brain from it. Two results, one good
+and one that needs measuring.
+
+#### Good: the moves map 1:1, so the integration is nearly free
+
+The firmware already has exactly the four actions the brain emits, selected by
+`cross`, and the dispatch is already written:
+
+| brain | `cross` | action | main.c |
+|---|---|---|---|
+| `'F'` | 0 | `Forward()` / `Forward_r()` | 1362 |
+| `'L'` | 1 | `turn_left()` / `turn_left_r()` | 1367 |
+| `'R'` | 2 | `turn_right()` / `turn_right_r()` | 1372 |
+| `'B'` | 4 | `head` flip + `nav+=2` | 1389 |
+
+So the integration replaces only the *choice* of `cross`. **Nothing between the
+decision and the motors changes.**
+
+`path_append()` (`main.c:939`) is the call point: it is the single choke point all
+eight junction decisions pass through, and it is where the link length is recorded.
+The brain is invoked just before the decision, because it needs `dist_cm` to place
+the node — the same number `path_append()` computes from the encoder delta since the
+`on_link==0 → ResetEncoder` at the top of the link (1359-1364), run through the
+`/(2.467*2)` and the per-command corrections at 951-972. That arithmetic should be
+factored into one helper called from both places; the corrections (+85/+95 after a
+turn, +25/+30 after a straight, +104 after a 'B') are empirical and must not drift.
+
+`in.left`/`in.right` come straight from `left_poss`/`right_poss` (1366-1367),
+`in.target` from `OnEndZoon` (1320). Both are read **before** the motion primitive,
+which clears them (602-603 etc.) — the rule SENSORS.md already records.
+
+#### Not good: the junction gate must be dropped, not inherited
+
+The firmware only ever chooses a turn when **both outer front sensors see line**:
+
+```c
+if (left_poss && (s[0] && s[9]))                        { cross=1; ... }   /* 1372 */
+else if (left_poss==0 && right_poss==1 && s[9] && s[0]) { ... }            /* 1378 */
+```
+
+`left_poss`/`right_poss` are set for any lateral (1366-1367); the `s[0] && s[9]` gate
+is a second, separate condition. At the 10.2 mm pitch that is a **91.8 mm** span
+(SENSORS.md §3), so a branch on **one side only** cannot satisfy it.
+
+Sampling the bar at the node centreline, with a 20 mm line, the black under the row
+is:
+
+| node type | black at the bar | `left_poss` | `right_poss` | gate |
+|---|---|---|---|---|
+| straight N+S | `\|x\| <= 10` | 0 | 0 | no |
+| corner S+W | `x <= 10` | 1 | 0 | **no** |
+| T S+N+W | `x <= 10` | 1 | 0 | **no** |
+| T S+N+E | `x >= -10` | 0 | 1 | **no** |
+| 4-way | everything | 1 | 1 | **yes** |
+
+So during discovery the gate passes **only at a 4-way**, and the only other report is
+`'B'` at a dead end — `'S'` needs `left_poss==0` and `'R'` needs the centre group
+*off* the line, neither of which happens at a 4-way. **The legacy explorer turns only
+at 4-ways, goes straight at every T, and records nothing at either.**
+
+That is not a bug: it is a coherent left-hand-rule walk, and the branch it declines
+to take is one the rule had already decided against. But it is **the wrong junction
+test for the brain**, which needs every real junction reported or it will never learn
+a one-sided branch and will claim `fully_explored` with edges missing. The brain must
+declare a junction on `left_poss || right_poss || dead-end`. The gate is part of the
+left-hand-rule logic being *replaced*, not part of reading the sensors.
+
+#### The one thing left unresolved: `front`
+
+`centre-on-line` (`s[3]||s[4]||s[5]||s[6]`, the firmware's own proxy at 1380) is
+correct at a crossing and at a T, and **wrong at a corner**: the corner's own arm is
+under the centre, so the proxy reads "forward open" where there is no forward. This
+matters because `Forward()` is not "drive straight" — it is the *line follower*, so a
+robot told 'F' at a corner will steer round the corner while the brain believes it
+went straight, and the dead reckoning diverges.
+
+Derived from geometry, not observed — so it wants measuring. The M1 telemetry build
+already logs exactly what settles both questions:
+
+```
+J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>
+```
+
+`<front>`/`<rear>` are the raw sensor masks as hex, so the black pattern at every
+real junction is recoverable, and `<L>`,`<R>`,`<cross>` say what the legacy logic
+concluded from it. One capture turns both open questions from reading into
+measurement.
+
+#### Also fixed
+
+- **SENSORS.md's citations were stale.** It cited `main.c:1202-1214` for the junction
+  decision — that region is now commented-out I2C scan code; the decision is at
+  1366-1407. The `turn_left()` clears moved `571-572` → `602-603` and the rest
+  likewise. Corrected.
+- **`nav` is updated only by explicit turns** (`turn_left` 614, `turn_right` 686,
+  U-turn 1434 — `Forward()` touches it not at all), and `node[]` is accumulated along
+  `nav` (1550-1553). So any turn taken without an explicit primitive leaves `nav`
+  stale. Recorded in SENSORS.md; it does **not** affect the solver, which keeps its
+  own heading and updates it from the moves it issued.
+- `inc/brain.h` gained a "HOW TO FEED IT FROM THE FIRMWARE" section: the mapping
+  table, the exact expressions, the call point, and the two open questions.
+
+No code changed. All five brain host tests still 5/5.
+
+---
+
 ### 2026-09-23 — The decision core (`brain.c`): the solver behind a junction-report interface
 
 **The problem this solves.** The solver library assumes it *drives* the robot: it
@@ -1003,6 +1112,20 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 - **Bring-up mode chosen:** the brain runs in firmware and prints each decision
   over Bluetooth, waits ~5 s, then executes. Supervised, one node at a time —
   see `New Start/` for the firmware's existing Bluetooth UART debug path.
+- **Two firmware questions the M1 capture settles** (both derived from the pitch
+  geometry, neither observed — see the 2026-09-23 "Reading the real junction logic"
+  entry, and `inc/brain.h` for the integration notes):
+  1. The legacy junction gate `s[0] && s[9]` passes only when a line crosses on
+     **both** sides. A one-sided branch cannot satisfy it, so the legacy explorer
+     turns only at 4-ways. **This gate must NOT be inherited** — the brain declares
+     a junction on `left_poss || right_poss || dead-end`, or it will never learn a
+     one-sided branch and will claim `fully_explored` with edges missing.
+  2. `front` = `centre-on-line` is the firmware's proxy and is **wrong at a corner**
+     (the corner's own arm is under the centre). That matters because `Forward()` is
+     the *line follower*, so a robot told 'F' at a corner steers round it while the
+     brain believes it went straight, and the dead reckoning diverges.
+  The `J` telemetry lines carry the raw `front`/`rear` sensor masks as hex plus
+  `L`,`R`,`cross`, so one capture turns both into measurements.
 - **The brain has never run on hardware.** Everything above is host-validated
   against a *model* of the firmware's junction detector (`brain_host.c` mirrors
   `main.c:1202-1214`). The first on-robot run is what tests that model.
