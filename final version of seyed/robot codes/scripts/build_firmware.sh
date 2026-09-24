@@ -10,7 +10,10 @@
 #
 # Usage (from robot codes/):
 #   bash scripts/build_firmware.sh                 # the mission firmware
-#   USE_TELEMETRY=1 bash scripts/build_firmware.sh # + the M1 bench telemetry dump
+#   USE_HEALTH=1    bash scripts/build_firmware.sh # + the bench health check only
+#   USE_TELEMETRY=1 bash scripts/build_firmware.sh # + mission telemetry AND the
+#                                                  #   health check (one flash
+#                                                  #   covers bench + run)
 #
 # Override the Keil location if needed:
 #   KEIL=/c/Keil_v5/ARM/ARMCC/bin bash scripts/build_firmware.sh
@@ -50,6 +53,10 @@ CPU="Cortex-M0+"
 MODE="brain-driven (decision core + solver library)"
 if [ "${USE_TELEMETRY:-0}" = "1" ]; then
     MODE="$MODE + USE_MAZE_TELEMETRY ON (M1 bench build: 125 Hz sensor/encoder dump)"
+    MODE="$MODE + USE_MAZE_HEALTH ON (bench health check: keys + 18 IR + gyro)"
+elif [ "${USE_HEALTH:-0}" = "1" ]; then
+    MODE="$MODE + USE_MAZE_HEALTH ON (bench health check: keys + 18 IR + gyro)"
+    MODE="$MODE + HEALTH_ONLY ON (BENCH: KEY1 disabled, no mission)"
 fi
 echo "=============================================="
 echo " SEYED firmware build -- $MODE"
@@ -72,6 +79,28 @@ CFLAGS+=("-I$SOLVER/inc")
 # bring-up pause, so USE_TELEMETRY=1 is the SUPERVISED build -- the plain build
 # drives on without stopping.
 [ "${USE_TELEMETRY:-0}" = "1" ] && CFLAGS+=(-DUSE_MAZE_TELEMETRY)
+
+# Bench health check: KEY1/2/3 + all 18 raw IR sensors + gyro, streamed whenever
+# the robot is standing still (before KEY1, and after a run).  It reuses the M1
+# timebase and TX buffer, so it costs two bytes of RAM and no new buffer.
+#
+# USE_TELEMETRY=1 turns it on as well, deliberately: the health stream runs in
+# the stopped states and the mission stream in the driving ones, so one flashed
+# build serves both the bench check and the run -- no reflashing in between.
+if [ "${USE_HEALTH:-0}" = "1" ] || [ "${USE_TELEMETRY:-0}" = "1" ]; then
+    CFLAGS+=(-DUSE_MAZE_HEALTH)
+fi
+
+# HEALTH_ONLY is the BENCH build, and it is the ONLY difference between
+# USE_HEALTH=1 and USE_TELEMETRY=1: with it, the pre-KEY1 loop never exits, so
+# the robot cannot start a mission no matter what is pressed.  KEY2/KEY3 then
+# drive the two calibrations and KEY1 re-sends the banner.
+#
+# Deliberately NOT implied by USE_TELEMETRY=1 -- that is the bring-up build and
+# it has to be able to run.  A bench session wants the opposite.
+if [ "${USE_HEALTH:-0}" = "1" ]; then
+    CFLAGS+=(-DHEALTH_ONLY)
+fi
 
 # ---- source list: exactly what Source.uvprojx compiles ----
 # Deliberately NOT a glob of HAL_Driver/Src, which also holds *_template.c

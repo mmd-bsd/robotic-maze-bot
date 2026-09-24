@@ -156,6 +156,12 @@ FONT_MONO = ("Consolas", 10)
 
 PHASE_NAME = {0: "EXPLORE", 1: "RETURN_HOME", 2: "FAST_RUN", 3: "DONE"}
 
+# The one byte the app ever says to the robot.  Value is arbitrary: the firmware's
+# USART1 IRQ flags ANY received byte under USE_MAZE_HEALTH, so the payload only
+# has to be something the operator can recognise in a wiring trace.  Kept as
+# `?` because it is also the byte a terminal user would type by hand to test.
+PROBE_BYTE = b"?"
+
 
 # ==========================================================================
 # DERIVATION -- what the brain was told, and what the sensors say
@@ -527,7 +533,29 @@ CSV_COLUMNS = [
     "target", "dist_cm", "node", "e0", "e1", "state", "x", "y", "drift", "move",
     "d_front", "d_left", "d_right", "oracle_move", "oracle_phase",
     "match", "notes",
+    # Appended, never interleaved: a capture CSV is read by column NAME, so
+    # adding at the end cannot shift a column an existing reader relies on.
+    # The health build's own two lines land here.
+    "keys", "loop", "adc", "what", "val",
 ]
+
+
+def health_row(kind, rec):
+    """One CSV row's worth of kwargs for an H or T line.
+
+    The eighteen channels go in as ONE semicolon-joined field rather than as
+    eighteen columns: the mission columns are irrelevant to a health build, and
+    duplicating the table for two line types that never appear together would
+    make both harder to read.  Semicolons, not commas, so the CSV stays one row
+    per wire line and a naive split on ',' still gives sane columns.
+    """
+    if kind == "H":
+        return {"type": "H", "robot_ms": rec["ms"], "keys": "%X" % rec["keys"],
+                "loop": rec["loop"], "head": rec["head"], "gz": rec["gz"],
+                "za": rec["za"],
+                "adc": ";".join(str(v) for v in rec["adc"])}
+    return {"type": "T", "robot_ms": rec["ms"], "what": rec["what"],
+            "val": ";".join(str(v) for v in rec["val"])}
 
 
 class Recorder:
@@ -598,6 +626,19 @@ class SerialSource(threading.Thread):
             if raw:
                 self.out.put(("line", raw.decode("ascii", "replace").strip()))
 
+    def send(self, data):
+        """Put a byte on the link.  The one thing the app says to the robot.
+
+        Used for the liveness probe: the firmware answers any received byte with
+        its `Hi ,mmdi` banner, which is how the operator knows the radio is up
+        rather than inferring it from a stream that has not started yet."""
+        try:
+            self.ser.write(data if isinstance(data, bytes) else data.encode())
+            return True
+        except Exception as exc:
+            self.out.put(("error", str(exc)))
+            return False
+
     def close(self):
         self.stop.set()
         try:
@@ -634,6 +675,19 @@ class Pipeline:
             except OracleError as exc:
                 self.oracle_error = str(exc)
         self.mission = Mission(self.oracle)
+        # The bench health model.  Fed ALWAYS, in every mode, not only when the
+        # health view is up: an H line means the firmware is in a stopped state,
+        # the checks are free, and a fault that appears while nobody is looking
+        # at that panel is exactly the fault that gets missed.  It is also what
+        # --health reports, so the live view and the exit code cannot disagree.
+        self.health = pt.HealthModel()
+        # The same H/T records, kept as parse() would have bucketed them, so
+        # --health can hand them to the SAME formatter parse_telemetry.py uses.
+        # That is what makes `bt_monitor --replay f --health` and
+        # `parse_telemetry f` print an identical health section: not two
+        # formatters kept in step by hand, but one.
+        self.health_by_kind = {"H": [], "T": []}
+        self.bad_lines = []
         self.rec = Recorder() if record else None
 
     def feed(self, line):
@@ -660,6 +714,19 @@ class Pipeline:
             return tag, None
 
         m.counters["lines"] += 1
+        if kind == "BAD":
+            self.bad_lines.append(rec)
+
+        if kind in ("H", "T"):
+            # The health build.  It has no map and no decision in it, so it goes
+            # to the health model and nowhere near the mission state machine --
+            # an H line must not advance the robot's believed position.
+            self.health.feed(kind, rec)
+            self.health_by_kind[kind].append(rec)
+            if self.rec:
+                self.rec.row(**health_row(kind, rec))
+            return kind, rec
+
         result = m.feed(kind, rec)
 
         if self.rec:
@@ -676,6 +743,19 @@ class Pipeline:
             else:
                 self.rec.row(type=kind, **rec)
         return kind, result
+
+    def health_verdict(self):
+        return self.health.worst()
+
+    def health_report(self):
+        """Print the bench health section.  -> exit code.
+
+        Delegates to `parse_telemetry.health_report()` on purpose.  The health
+        checks and their wording live in one place, so the live tool and the
+        batch tool cannot drift -- the same reasoning that makes parse_line()
+        the single definition of the wire format.
+        """
+        return pt.health_report(self.health_by_kind, self.bad_lines)
 
     def summary(self):
         return self.mission.verdict()
@@ -700,6 +780,35 @@ class Pipeline:
 # HEADLESS
 # ==========================================================================
 
+def run_headless_health(pipe, lines):
+    """--health: the bench check, assertable from build_all.ps1.
+
+    Exit 1 iff a finding is FAIL, which is the same verdict the GUI colours and
+    parse_telemetry.py prints -- all three go through HealthModel.findings().
+    Exit 2 is reserved for "this capture has nothing to check", which is a
+    different thing from "the robot is unhealthy" and must not read as a pass.
+    """
+    for line in lines:
+        pipe.feed(line)
+
+    if not pipe.health.h:
+        print("bt_monitor --health: no H lines in this capture -- nothing to check.")
+        print("  H/T lines exist only in a USE_MAZE_HEALTH build (BUILD_GUIDE.md,")
+        print("  'Health check') and only while the robot stands still.  A")
+        print("  mission capture has none, so this is almost certainly the wrong")
+        print("  file, and it must not look like a pass.")
+        return 2
+
+    rc = pipe.health_report()
+    base = pipe.rec.base if pipe.rec else None
+    pipe.shutdown()
+    if base:
+        print("\n recorded: %s.txt / .csv / .json" % base)
+    print(" bt_monitor --health exit %d (%s)"
+          % (rc, "FAIL present" if rc else "no FAIL"))
+    return rc
+
+
 def run_headless(args):
     lines = None
     if args.replay:
@@ -712,9 +821,16 @@ def run_headless(args):
         return 2
 
     pipe = Pipeline(args.oracle, record=args.record)
-    if pipe.oracle is None and not args.no_oracle:
+    # --health does not need the oracle at all: it checks the SENSORS, and there
+    # is no decision in an H line to check against.  Requiring the oracle there
+    # would make the health check fail on a machine that has not built it, and
+    # then the two checks in build_all.ps1 would be coupled for no reason.
+    if pipe.oracle is None and not (args.no_oracle or args.health):
         print("bt_monitor: %s" % (pipe.oracle_error or "no oracle"))
         return 2
+
+    if args.health:
+        return run_headless_health(pipe, lines)
 
     print("  %-4s %-8s %-10s %-8s %-6s %-6s %s"
           % ("#", "t(ms)", "mask->FLR", "dir", "robot", "oracle", "notes"))
@@ -787,6 +903,12 @@ def run_headless(args):
 # ==========================================================================
 
 class MonitorApp:
+    # How many lines the TERMINAL keeps.  Big enough for a whole bench session's
+    # worth of key edges and calibrations, small enough that the Text widget is
+    # never the reason a frame takes long -- and trimming is what stops an
+    # all-nighter's worth of unparsed lines from growing without bound.
+    TERM_LINES = 400
+
     def __init__(self, root, tk, ttk, args):
         self.root, self.tk = root, tk
         self.args = args
@@ -798,6 +920,8 @@ class MonitorApp:
         self.replay_i = 0
         self.last_j = None
         self.last_s = None
+        self._thr_sig = {}      # last-seen T values, so only CHANGES are logged
+        self._prev_keys = None  # last key bitmask, so only EDGES are logged
 
         self._build(tk, ttk)
         if args.demo:
@@ -846,9 +970,49 @@ class MonitorApp:
         tk.Checkbutton(bar, text="Record", variable=self.rec_var, bg=PANEL_BG,
                        fg=FG, selectcolor=CARD_BG, activebackground=PANEL_BG,
                        activeforeground=FG, font=FONT).pack(side="left", padx=6)
+        self.btn_view = tk.Button(bar, text="View: mission", command=self._toggle_view,
+                                  bg=CARD_BG, fg=FG, font=FONT, relief="flat",
+                                  width=16)
+        self.btn_view.pack(side="left", padx=6)
         self.lbl_conn = tk.Label(bar, text="not connected", bg=PANEL_BG,
                                  fg=FG_MUTED, font=FONT)
         self.lbl_conn.pack(side="left", padx=10)
+
+        # ---- THE TERMINAL.  Deliberately an EVENT log, not a raw dump of the
+        # wire: the health stream runs at 20 lines a second, so a true raw
+        # terminal would push the `Hi ,mmdi` banner -- the one line that proves
+        # the link -- off the top within a second of arriving, which is exactly
+        # the opposite of what it is wanted for.  So this shows the banner,
+        # every unparsed line, key edges, the calibrations and link changes, and
+        # the 20 Hz stream is drawn in the bar above instead.  Nothing is hidden
+        # by leaving it out; it is just in the other pane.
+        #
+        # Packed BEFORE the body: pack hands out space in call order, so a
+        # fill="x" strip added afterwards would get whatever the expanding body
+        # left over -- i.e. nothing.
+        term = tk.Frame(self.root, bg=PANEL_BG)
+        term.pack(side="bottom", fill="x")
+        head = tk.Frame(term, bg=PANEL_BG)
+        head.pack(fill="x")
+        self.lbl_term = tk.Label(head, text="TERMINAL   (link events -- the 20 Hz "
+                                            "stream is in the bar above)",
+                                 bg=PANEL_BG, fg=ACCENT, font=FONT_BOLD)
+        self.lbl_term.pack(side="left", padx=8, pady=(4, 0))
+        tk.Button(head, text="Ping robot", command=self._ping, bg=CARD_BG, fg=FG,
+                  font=FONT, relief="flat").pack(side="right", padx=8, pady=3)
+        tk.Button(head, text="Clear", command=self._clear_term, bg=CARD_BG, fg=FG,
+                  font=FONT, relief="flat").pack(side="right", padx=2, pady=3)
+        self.term = tk.Text(term, height=7, bg=CANVAS_BG, fg=FG,
+                            font=("Consolas", 9), relief="flat", wrap="none",
+                            highlightthickness=0, insertbackground=FG)
+        self.term.pack(fill="x", padx=8, pady=(2, 8))
+        self.term.tag_configure("banner", foreground=OK_COLOR)
+        self.term.tag_configure("bad", foreground=BAD_COLOR)
+        self.term.tag_configure("warn", foreground=WARN_COLOR)
+        self.term.tag_configure("muted", foreground=FG_MUTED)
+        self.term.configure(state="disabled")
+        self._log("bt_monitor started.  Connect, then the probe byte asks the "
+                  "robot to identify itself.", "muted")
 
         body = tk.Frame(self.root, bg=BG)
         body.pack(side="top", fill="both", expand=True)
@@ -858,9 +1022,50 @@ class MonitorApp:
         right = tk.Frame(body, bg=PANEL_BG, width=440)
         right.pack(side="right", fill="y", padx=(4, 8), pady=8)
         right.pack_propagate(False)
+        self.right = right
 
+        # THE CARDS SCROLL.  The column is taller than the window: the toolbar
+        # and the TERMINAL strip take about 190 px of the 800, so the panel is
+        # left with ~580, and the six health cards request ~780 on a capture with
+        # findings.  The card that fell off the bottom was CHECKS -- the verdict,
+        # the one thing the bench build exists to produce.  So the cards live on
+        # a canvas that scrolls; each card keeps its shape and nothing is
+        # unreachable.  See _scroll_card for the one card with its own scrollbar
+        # on top of this (THRESHOLDS, 19 rows of table).
+        self.panel_scroll = tk.Scrollbar(right, orient="vertical", bg=CARD_BG,
+                                         troughcolor=PANEL_BG, bd=0,
+                                         highlightthickness=0, relief="flat",
+                                         activebackground=ACCENT)
+        self.panel_canvas = tk.Canvas(right, bg=PANEL_BG, highlightthickness=0,
+                                      yscrollcommand=self.panel_scroll.set)
+        self.panel_scroll.configure(command=self.panel_canvas.yview)
+        self.panel_scroll.pack(side="right", fill="y")
+        self.panel_canvas.pack(side="left", fill="both", expand=True)
+        holder = tk.Frame(self.panel_canvas, bg=PANEL_BG)
+        self._panel_win = self.panel_canvas.create_window((0, 0), window=holder,
+                                                          anchor="nw")
+        # The inner frame cannot know the canvas width, and the canvas cannot
+        # know the frame height, so each is told by the other's <Configure>.
+        holder.bind("<Configure>", lambda e: self.panel_canvas.configure(
+            scrollregion=self.panel_canvas.bbox("all")))
+        self.panel_canvas.bind("<Configure>", lambda e: self.panel_canvas
+                               .itemconfigure(self._panel_win, width=e.width))
+        self.root.bind_all("<MouseWheel>", self._panel_wheel, add="+")
+
+        # Two panels, only ever one packed at a time.  They are built once and
+        # swapped with pack/pack_forget rather than rebuilt per frame: a tick
+        # runs every 30 ms and tearing down a hundred widgets at that rate would
+        # be felt.
+        self.mission_panel = tk.Frame(holder, bg=PANEL_BG)
+        self.health_panel = tk.Frame(holder, bg=PANEL_BG)
+        self._build_mission_panel(tk)
+        self._build_health_panel(tk)
+        self.set_view("health" if self.args.health else "mission", auto=not
+                      self.args.health)
+
+    def _build_mission_panel(self, tk):
         self.status_labels = {}
-        card = self._card(right, "MISSION", tk)
+        card = self._card(self.mission_panel, "MISSION", tk)
         for key in ("phase", "node", "position", "heading", "drift", "reports",
                     "cells", "target_found", "fast_time", "lines", "unparsed",
                     "mismatches", "corner"):
@@ -873,15 +1078,107 @@ class MonitorApp:
             lbl.pack(side="left")
             self.status_labels[key] = lbl
 
-        self.brainin_text = self._text_card(right, "LAST JUNCTION -> BrainIn",
+        self.brainin_text = self._text_card(self.mission_panel,
+                                            "LAST JUNCTION -> BrainIn", FG, tk)
+        self.verdict_text = self._text_card(self.mission_panel, "DECISION",
                                             FG, tk)
-        self.verdict_text = self._text_card(right, "DECISION", FG, tk)
-        self.sensor_lbls = [self._text_card(right, "SENSOR BAR  (S lines, 125 Hz)"
+        self.sensor_lbls = [self._text_card(self.mission_panel,
+                                            "SENSOR BAR  (S lines, 125 Hz)"
                                             if i == 0 else None, FG_MUTED, tk,
                                             mono=("Consolas", 9))
                             for i in range(2)]
-        self.plans_text = self._text_card(right, "PLANS (oracle)",
+        self.plans_text = self._text_card(self.mission_panel, "PLANS (oracle)",
                                           FASTEST_PATH, tk)
+
+    def _build_health_panel(self, tk):
+        """The bench cards.  Same information the --health report prints, so
+        the operator on the bench and the operator reading a file are looking
+        at the same verdict rather than two opinions."""
+        # STATE first: on the bench the single most useful number on the wire is
+        # loop_start, because everything else is read in the context of it --
+        # "is this robot stopped, and is it stopped where I think it is".
+        card = self._card(self.health_panel, "STATE  (loop_start)", tk)
+        self.state_label = tk.Label(card, text="-", bg=CARD_BG, fg=FG,
+                                    font=("Consolas", 11, "bold"), anchor="w",
+                                    justify="left")
+        self.state_label.pack(fill="x", padx=6, pady=(4, 0))
+        self.state_note = tk.Label(card, text="-", bg=CARD_BG, fg=FG_MUTED,
+                                   font=("Consolas", 8), anchor="w",
+                                   justify="left", wraplength=380)
+        self.state_note.pack(fill="x", padx=6, pady=(0, 4))
+
+        card = self._card(self.health_panel, "KEYS", tk)
+        row = tk.Frame(card, bg=CARD_BG)
+        row.pack(fill="x")
+        self.key_lbls = []
+        for bit, name, pin in pt.KEY_BITS:
+            lbl = tk.Label(row, text="%s\n%s" % (name, pin), bg=CARD_BG,
+                           fg=FG_MUTED, font=FONT_BOLD, width=13, pady=6)
+            lbl.pack(side="left", padx=2)
+            self.key_lbls.append((bit, lbl))
+        # The edge log is what makes BOUNCE and a STUCK button visible: a press
+        # that never comes up, or a burst of edges too short to be a finger.
+        self.key_log = tk.Label(card, text="no key changes yet", bg=CARD_BG,
+                                fg=FG_MUTED, font=("Consolas", 9),
+                                justify="left", anchor="w")
+        self.key_log.pack(fill="x", padx=6, pady=2)
+
+        self.derived_text = self._text_card(self.health_panel,
+                                            "DERIVED  (from ADC vs IR_mid)",
+                                            FG, tk, mono=("Consolas", 10))
+        self.gyro_text = self._text_card(self.health_panel, "GYRO", FG, tk)
+        self.thr_text = self._scroll_card(self.health_panel,
+                                          "THRESHOLDS  (T lines -- scroll for "
+                                          "all 18)", FG_MUTED, tk,
+                                          mono=("Consolas", 9))
+
+        # CHECKS is the one card whose contents change shape, so its widgets are
+        # rebuilt only when the finding list actually changes -- colour-coding
+        # one line per finding is the whole point of it.
+        tk.Label(self.health_panel, text="CHECKS", bg=PANEL_BG, fg=ACCENT,
+                 font=FONT_BOLD, anchor="w").pack(fill="x", padx=8, pady=(8, 2))
+        self.checks_card = tk.Frame(self.health_panel, bg=CARD_BG)
+        self.checks_card.pack(fill="x", padx=8, pady=(0, 4))
+        self._checks_sig = None
+
+    def set_view(self, view, auto=False):
+        self.view = view
+        self.view_auto = auto
+        self.mission_panel.pack_forget()
+        self.health_panel.pack_forget()
+        (self.health_panel if view == "health"
+         else self.mission_panel).pack(fill="both", expand=True)
+        self.btn_view.configure(text="View: %s%s"
+                                % (view, " (auto)" if auto else ""))
+
+    def _toggle_view(self):
+        # An explicit click means the operator has decided; stop second-guessing
+        # them on the next line that arrives.
+        self.set_view("mission" if self.view == "health" else "health",
+                      auto=False)
+
+    def _auto_view(self, kind):
+        """Follow the build, until the operator says otherwise.
+
+        A capture is one build or the other: H lines only exist in a health
+        build, J lines only while driving.  So the first real line tells us
+        which panel is useful, and guessing wrong costs nothing but a click.
+
+        Only telemetry moves the view.  The `Hi ,mmdi` boot banner arrives
+        FIRST on every real capture, health or not, so switching on anything
+        that parses would make a health capture flash the mission panel before
+        settling -- a flicker that reads as a bug.
+        """
+        if not self.view_auto:
+            return
+        if kind in ("H", "T"):
+            want = "health"
+        elif kind in ("J", "S", "B", "Z"):
+            want = "mission"
+        else:
+            return
+        if want != self.view:
+            self.set_view(want, auto=True)
 
     def _card(self, parent, title, tk):
         tk.Label(parent, text=title, bg=PANEL_BG, fg=ACCENT, font=FONT_BOLD,
@@ -890,16 +1187,125 @@ class MonitorApp:
         card.pack(fill="x", padx=8, pady=(0, 4))
         return card
 
-    def _text_card(self, parent, title, colour, tk, mono=FONT_MONO):
+    def _text_card(self, parent, title, colour, tk, mono=FONT_MONO, wrap=0):
         if title:
             tk.Label(parent, text=title, bg=PANEL_BG, fg=ACCENT, font=FONT_BOLD,
                      anchor="w").pack(fill="x", padx=8, pady=(8, 2))
         card = tk.Frame(parent, bg=CARD_BG)
         card.pack(fill="x", padx=8, pady=(0, 4))
         lbl = tk.Label(card, text="-", bg=CARD_BG, fg=colour, font=mono,
-                       justify="left", anchor="w")
+                       justify="left", anchor="w",
+                       wraplength=wrap or 0)
         lbl.pack(fill="x", padx=6, pady=2)
         return lbl
+
+    def _scroll_card(self, parent, title, colour, tk, mono=FONT_MONO, height=10):
+        """A card whose text scrolls in place, rather than growing the panel.
+
+        The thresholds table is one line per pad -- 19 of them -- and the right
+        panel is a single column of cards in an 800 px window.  Left to grow, it
+        pushes CHECKS off the bottom and clips the last pads, which are exactly
+        the rows an operator scanning for a dead sensor has not reached yet.  So
+        this card has a fixed height and its own scrollbar: everything stays
+        reachable, and the live cards above it (STATE, KEYS, GYRO) stay where
+        they were instead of the whole panel scrolling to reach a table.
+        """
+        tk.Label(parent, text=title, bg=PANEL_BG, fg=ACCENT, font=FONT_BOLD,
+                 anchor="w").pack(fill="x", padx=8, pady=(8, 2))
+        card = tk.Frame(parent, bg=CARD_BG)
+        card.pack(fill="x", padx=8, pady=(0, 4))
+        box = tk.Text(card, height=height, bg=CARD_BG, fg=colour, font=mono,
+                      relief="flat", bd=0, highlightthickness=0, wrap="word",
+                      padx=6, pady=2, state="disabled", takefocus=1,
+                      insertwidth=0, selectbackground=CARD_BG,
+                      selectforeground=colour)
+        bar = tk.Scrollbar(card, orient="vertical", command=box.yview,
+                           bg=CARD_BG, troughcolor=PANEL_BG, bd=0,
+                           highlightthickness=0, relief="flat",
+                           activebackground=ACCENT)
+        box.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        box.pack(side="left", fill="both", expand=True)
+        return box
+
+    def _set_scroll_text(self, box, text, colour):
+        """Rewrite a scrolling card, but ONLY when its text really changed.
+
+        This is called from the 30 ms tick.  Re-inserting the same 19 lines every
+        frame would fight the operator's scrollbar and reset the view under their
+        hand.  T lines arrive about three times a second and stop changing once
+        the calibration has settled, so the guard costs nothing and it is what
+        makes the card usable at all.  The scroll position is carried across an
+        update for the same reason.
+        """
+        if text == box.get("1.0", "end-1c") and colour == box.cget("fg"):
+            return
+        at = box.yview()[0]
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        box.insert("1.0", text)
+        box.configure(state="disabled", fg=colour)
+        box.yview_moveto(at)
+
+    def _panel_wheel(self, e):
+        """The wheel scrolls whatever is under the pointer.
+
+        Two scroll regions meet here: the card column, and the THRESHOLDS table
+        inside it, plus the TERMINAL strip which is a Text of its own.  A Text
+        scrolls itself (it is the innermost thing the pointer can be over), and
+        anything else inside the right-hand panel scrolls the panel.  The
+        handler is explicit rather than left to Tk's own wheel bindings, which
+        would scroll BOTH the table and the panel under it on one notch.
+        """
+        w = e.widget
+        if isinstance(w, self.tk.Text):
+            w.yview_scroll(-3 if e.delta > 0 else 3, "units")
+            return "break"
+        while w is not None:
+            if w is self.right:
+                self.panel_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+                return "break"
+            w = getattr(w, "master", None)
+        return None
+
+    # -------------------------------------------------------------- terminal
+    def _log(self, text, tag=None):
+        """Append one timestamped line to the TERMINAL.
+
+        The Text widget stays `disabled` so a stray click cannot put a caret in
+        it and make the log editable; the state is flipped only around this
+        insert.  Trimming from the top is what keeps an unattended session from
+        growing the widget forever.
+        """
+        self.term.configure(state="normal")
+        self.term.insert("end", "%s  %s\n" % (time.strftime("%H:%M:%S"), text),
+                         (tag,) if tag else ())
+        over = int(self.term.index("end-1c").split(".")[0]) - self.TERM_LINES
+        if over > 0:
+            self.term.delete("1.0", "%d.0" % (over + 1))
+        self.term.see("end")
+        self.term.configure(state="disabled")
+
+    def _clear_term(self):
+        self.term.configure(state="normal")
+        self.term.delete("1.0", "end")
+        self.term.configure(state="disabled")
+
+    def _ping(self):
+        """Ask the robot to identify itself.
+
+        This is the whole point of the terminal: `Hi ,mmdi` arriving here proves
+        the radio is up in BOTH directions.  A silent health bar proves nothing
+        on its own -- the robot streams whether or not anything is listening, so
+        a mis-paired port looks identical to a robot that is merely holding
+        still.  A banner can only be a reply.
+        """
+        if self.source is None:
+            self._log("no link -- connect first, then ping", "warn")
+            return
+        if self.source.send(PROBE_BYTE):
+            self._log("-> probe %r sent, waiting for the banner"
+                      % PROBE_BYTE.decode(), "muted")
 
     # ------------------------------------------------------------- connection
     def refresh_ports(self):
@@ -930,16 +1336,24 @@ class MonitorApp:
             return
         self.btn_conn.configure(text="Disconnect")
         self.lbl_conn.configure(text="connected %s" % port, fg=OK_COLOR)
+        self._log("opened %s @ %s" % (port, self.baud_var.get()), "muted")
+        # Ask straight away rather than waiting for the operator to press Ping:
+        # "every time we connect, the robot says Hi" is the point of the banner,
+        # and the connect click is the moment that has to be proved.
+        self._ping()
         if self.rec_var.get():
             self.pipe.rec = self.pipe.rec or Recorder()
             self.lbl_conn.configure(
                 text="recording -> %s.txt" % os.path.basename(self.pipe.rec.base),
                 fg=WARN_COLOR)
+            self._log("recording -> %s.txt"
+                      % os.path.basename(self.pipe.rec.base), "muted")
 
     def disconnect(self):
         if self.source:
             self.source.close()
             self.source = None
+            self._log("link closed", "muted")
         self.btn_conn.configure(text="Connect")
         self.lbl_conn.configure(text="not connected", fg=FG_MUTED)
 
@@ -966,6 +1380,7 @@ class MonitorApp:
                 elif kind == "error":
                     self.lbl_conn.configure(text="link error: %s" % payload,
                                             fg=BAD_COLOR)
+                    self._log("link error: %s" % payload, "bad")
                     self.disconnect()
         except queue.Empty:
             pass
@@ -987,6 +1402,70 @@ class MonitorApp:
             self.last_j = res
         elif kind == "S":
             self.last_s = res
+        self._auto_view(kind)
+        self._log_line(kind, line, res)
+
+    def _log_line(self, kind, line, res):
+        """What goes in the terminal, and what deliberately does not.
+
+        The 20 Hz stream is the whole point of the bar above and would bury
+        everything else here within a second, so H lines do not appear as
+        lines -- except when a KEY changes, which is a fact about the hardware
+        and worth its own entry.  T lines are logged only when they change what
+        the thresholds ARE: three of them cycle every second and they are
+        identical until somebody presses KEY2.
+
+        `kind` is NOT `parse_line`'s verdict -- `Pipeline.feed` re-tags a
+        non-record line on the way through, so the handshake arrives here as
+        CHATTER.  (`_count` is the one that decides that split.)"""
+        if kind == "CHATTER":
+            # Three things land here, and they are worth telling apart: the
+            # `Hi ,mmdi` handshake (the whole point of the pane -- green), the
+            # KEY2 calibration's IR_mid dump (the evidence that the calibration
+            # did something), and the boot banner at power-on.
+            text = line.strip()
+            if not text:
+                return
+            if "Hi" in text and "mmd" in text:
+                self._log("robot says: %s   <- LINK IS UP" % text, "banner")
+            else:
+                self._log("robot: %s" % text, "muted")
+        elif kind == "BAD":
+            self._log("unparsed: %s" % line.strip(), "bad")
+        elif kind in ("PLAN", "PLAN-MISMATCH") and res is not None:
+            # KEY3 dumps the firmware's own stored plan string.  Comparing it
+            # against the oracle's is the check that the copy into
+            # path_back/path_discoverd_s did not corrupt it, so a mismatch is
+            # the loudest thing this pane can say.
+            bad = kind == "PLAN-MISMATCH"
+            self._log("%s: %s%s"
+                      % ("PLAN MISMATCH" if bad else "plan dump",
+                         res[1],
+                         "" if bad else "   (matches the oracle)"),
+                      "bad" if bad else "muted")
+        elif kind == "H" and res is not None:
+            keys = res["keys"]
+            if self._prev_keys is not None and keys != self._prev_keys:
+                for bit, name, _pin in pt.KEY_BITS:
+                    if (keys & bit) == (self._prev_keys & bit):
+                        continue
+                    self._log("  %s %s   (t=%d ms)"
+                              % (name, "DOWN" if keys & bit else "up  ",
+                                 res["ms"]),
+                              "warn" if keys & bit else "muted")
+            self._prev_keys = keys
+        elif kind == "T" and res is not None:
+            sig = tuple(res["val"])
+            if self._thr_sig.get(res["what"]) != sig:
+                first = res["what"] not in self._thr_sig
+                self._thr_sig[res["what"]] = sig
+                self._log("thresholds %-3s %s  %s..."
+                          % (res["what"],
+                             "arrived" if first else "CHANGED to",
+                             ",".join(str(v) for v in res["val"][:6])),
+                          "muted" if first else "warn")
+        elif kind == "Z":
+            self._log("target zone: %s" % line.strip(), "warn")
 
     # ------------------------------------------------------------------ draw
     def _transform(self):
@@ -1009,6 +1488,9 @@ class MonitorApp:
         return ox + x * scale, oy - y * scale
 
     def _draw(self):
+        if self.view == "health":
+            self._draw_health()
+            return
         tk = self.tk
         m = self.pipe.mission
         tr = self._transform()
@@ -1105,7 +1587,224 @@ class MonitorApp:
             y += step
 
     # ---------------------------------------------------------------- panels
+    # ------------------------------------------------------- the health canvas
+    #
+    # WHAT THIS PICTURE IS FOR.  It is the bench answer to a question the repo
+    # cannot answer from a desk: which pads are actually over black, right now,
+    # and what would the firmware make of it.  Park the robot on a corner by
+    # hand and the centre group and the node gate can be read straight off the
+    # screen -- which is the static test for the open `in.front` question
+    # (root CLAUDE.md), with no drive and no J line needed.
+    #
+    # WHAT IT IS NOT.  The roles drawn here are SENSORS.md's, and a pad that
+    # tracks white and black perfectly can still be the WRONG pad.  Confirming
+    # that needs the robot on the field.  The colour is derived from IR_ADC[]
+    # vs IR_mid[], not from the firmware's latched s[], so it says what the
+    # firmware WOULD decide, not what it decided -- the S/J lines are the
+    # authority on that.
+    # THE KEY to the strips under the pads.  Nothing on the canvas spells these
+    # out any more: the strip colour IS the role, and this tuple is the order
+    # they are drawn in -- the same four roles, and the same colours, as the
+    # HEALTH card's per-pad rows, which is where the words are.
+    ROLE_TAG = ("centre (in.front)", "branch detector", "target detector",
+                "node gate (s[0]&&s[9])")
+    ROLE_COLOUR = (ACCENT, WARN_COLOR, TARGET_RING, OK_COLOR)
+
+    def _draw_health(self):
+        c = self.canvas
+        model = self.pipe.health
+        w = c.winfo_width() or 700
+        if model.last is None:
+            c.create_text(w / 2.0, 60, anchor="center", fill=FG_MUTED, font=FONT,
+                          text="waiting for the first H line -- the health build "
+                               "streams only while the robot is standing still")
+            return
+
+        d = model.derived()
+        adc = model.last["adc"]
+
+        # THE BOARD, drawn as a board: long and narrow, front at the top, every
+        # pad at its pt.PAD_CELL position.  Read that table's comment for the
+        # shape and for why the shape matters.  The cells are square and sized to
+        # fit BOTH the pane's width and its height, so the picture keeps the
+        # robot's proportions instead of being stretched to fill the canvas --
+        # which is what a row-of-sensors drawing could not do.
+        #
+        # NOTHING is written in the margins.  Everything that used to be (the
+        # target-U caption, the derived summary, the role legend, the caveat) is
+        # on the right-hand cards already, or is a duplicate of one.
+        # winfo_* is 1 for a widget that has not been laid out yet (the first
+        # pass after start-up), and `or` does not catch that, so test it.
+        cw = c.winfo_width() if c.winfo_width() > 200 else 700
+        chh = c.winfo_height() if c.winfo_height() > 200 else 560
+        cell = min((cw - 36.0) / pt.BOARD_COLS, (chh - 28.0) / pt.BOARD_ROWS)
+        bw, bh = pt.BOARD_COLS * cell, pt.BOARD_ROWS * cell
+        x0, y0 = (cw - bw) / 2.0, 14.0
+        # S0 sits just left of the centre line and S9 just right of it, so the
+        # rotation axis IS the board's centre line, and that line is drawn.
+        axis_x = x0 + pt.BOARD_COLS / 2.0 * cell
+        # The pads are a bit larger than their cell -- the one schematic liberty
+        # taken in this drawing, so the name and the ADC both fit inside.  They
+        # are sized from the cell rather than fixed, so they grow with the pane
+        # and never collide: the closest two pads are two cells apart, and 1.6
+        # cells of pad leaves a visible gap between them.
+        pw, ph = cell * 1.6, cell * 1.5
+
+        c.create_rectangle(x0, y0, x0 + bw, y0 + bh, outline="#3a4058", width=2)
+        c.create_line(axis_x, y0, axis_x, y0 + bh, fill="#8f97b0", dash=(3, 3))
+
+        def role_tag(i):
+            short = pt.sensor_short_role(i)
+            return {"centre": 0, "LEFT branch det.": 1, "RIGHT branch det.": 1,
+                    "target detector": 2, "node gate": 3}[short]
+
+        def pad_box(i):
+            """The pixel box of pad i, and its centre."""
+            col, r = pt.PAD_CELL[i]
+            cx = x0 + (col + 0.5) * cell
+            cy = y0 + (r + 0.5) * cell
+            return cx - pw / 2.0, cy - ph / 2.0, cx + pw / 2.0, cy + ph / 2.0
+
+        # The target test, where it applies: the whole U of the LEADING bank has
+        # to go black at once (main.c:1266-1267) -- s[1..8] in front, s[10..17]
+        # at the back.  A dashed box rather than a caption: the eight pads are
+        # either together at the front of the ring or together at the back.
+        box = [pad_box(i) for i in (pt.TARGET_ROW if not d["head"]
+                                    else pt.REAR_TARGET_ROW)]
+        c.create_rectangle(min(b[0] for b in box) - 5, min(b[1] for b in box) - 5,
+                           max(b[2] for b in box) + 5, max(b[3] for b in box) + 7,
+                           outline=TARGET_RING, dash=(4, 3), width=1)
+
+        for i in range(18):
+            x1, y1, x2, y2 = pad_box(i)
+            lg = d["logic"][i]
+            if lg is None:
+                fill, outline, tcol = "#2a2f45", WARN_COLOR, WARN_COLOR
+            elif lg:
+                # BLACK: near-black fill, so the picture matches the paper.
+                fill, outline, tcol = "#0a0b10", "#4a5170", FG
+            else:
+                fill, outline, tcol = "#c9cee0", "#eef1fa", "#12141c"
+            c.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline,
+                               width=2)
+            c.create_text((x1 + x2) / 2.0, y1 + ph * 0.28,
+                          text=pt.sensor_name(i), fill=tcol,
+                          font=("Consolas", 7, "bold"))
+            c.create_text((x1 + x2) / 2.0, y1 + ph * 0.72, text=str(adc[i]),
+                          fill=tcol, font=("Consolas", 7))
+            # A strip under each pad carries its ROLE.  Drawn as a strip rather
+            # than as a box around the pad so two overlapping roles (the centre
+            # group is also inside the target U) do not fight for the outline.
+            c.create_rectangle(x1, y2 + 1, x2, y2 + 4,
+                               fill=self.ROLE_COLOUR[role_tag(i)], outline="")
+
+        # That is the whole drawing.  Nothing is written under the board -- not
+        # the derived summary, not the role legend, not the loop_start line, and
+        # not the "a green strip does not mean the sensors are right" caveat.
+        # Every one of them is on a card to the right (`_update_health_panel` and
+        # `DERIVED`), and a second copy under the picture was competing with the
+        # picture for the same pane.  The pads' own name and ADC stay inside
+        # their cells: without those the drawing would say nothing at all.
+        #
+        # The strips under the cells are the ROLE, and they are the one thing
+        # here that needs its key: the key is `ROLE_TAG`/`ROLE_COLOUR` above, and
+        # the same four names are spelled out on the HEALTH card's checks.
+
+    # ------------------------------------------------------------- the panels
+    def _update_health_panel(self):
+        model = self.pipe.health
+        last = model.last
+        if last is None:
+            return
+
+        for bit, lbl in self.key_lbls:
+            down = bool(last["keys"] & bit)
+            lbl.configure(bg=ACCENT if down else CARD_BG,
+                          fg="#0d0f15" if down else FG_MUTED)
+
+        # loop_start, spelled out.  A live H stream only ever arrives in a
+        # stopped state, so a state this panel does not expect is worth saying
+        # out loud rather than printing a bare number over.
+        state = last["loop"]
+        stopped = state == 0 or state >= 7
+        self.state_label.configure(
+            text="%d   %s" % (state, pt.loop_state(state)),
+            fg=FG if stopped else WARN_COLOR)
+        self.state_note.configure(
+            text="head=%d (%s bank leads)   keys=%X%s"
+                 % (last["head"], "front" if not last["head"] else "rear",
+                    last["keys"],
+                    "" if stopped else
+                    "\n>> the health stream only exists in a STOPPED state "
+                    "(0, or 7 and up) -- seeing %d means either a driving build "
+                    "or a state table that is out of date" % state))
+
+        if model.key_edges:
+            lines = []
+            for e in model.key_edges[-5:]:
+                lines.append("t=%-7d %-5s %s%s"
+                             % (e["ms"], e["name"],
+                                "down" if e["down"] else "up  ",
+                                "" if e["down"] else "  held %d ms" % e["held_ms"]))
+            self.key_log.configure(text="\n".join(lines), fg=FG)
+        else:
+            self.key_log.configure(text="no key changes yet -- press one",
+                                   fg=FG_MUTED)
+
+        d = model.derived()
+
+        def tri(v):
+            return "?" if v is None else str(v)
+        if d:
+            self.derived_text.configure(
+                text="F%s  L%s  R%s   at_node=%s  target=%s\n"
+                     "derived from ADC vs IR_mid, not the firmware's s[]"
+                     % (tri(d["front"]), tri(d["left"]), tri(d["right"]),
+                        tri(d["at_node"]), tri(d["target_row"])),
+                fg=FG)
+        gyro_ok = model.gz_max is None or model.gz_max <= pt.GYRO_STILL_DPS
+        self.gyro_text.configure(
+            text="Gyro_Z %6.1f deg/s   (peak |.| %s)\nZ_Angle %5.1f deg\n%s"
+                 % (last["gz"], "-" if model.gz_max is None
+                    else "%.1f" % model.gz_max, last["za"],
+                    "resting: looks calibrated" if gyro_ok else
+                    ">> A BIAS, NOT MOTION -- press KEY3 to calibrate"),
+            fg=FG if gyro_ok else WARN_COLOR)
+
+        if model.thr:
+            rows = ["  pad   mid  min=BLK max=WHT  span"]
+            for r in model.rows():
+                rows.append("  %-5s %5d %7d %7d %5d"
+                            % (r["name"], r["mid"], r["cal_lo"], r["cal_hi"],
+                               r["cal_span"]))
+            self._set_scroll_text(self.thr_text, "\n".join(rows), FG_MUTED)
+        else:
+            self._set_scroll_text(self.thr_text,
+                                  "no T line yet -- thresholds unknown,\n"
+                                  "so nothing can be compared against them",
+                                  WARN_COLOR)
+
+        findings = model.findings()
+        sig = tuple(findings)
+        if sig != self._checks_sig:
+            # Rebuild only on change: this runs from a 30 ms tick.
+            self._checks_sig = sig
+            for child in self.checks_card.winfo_children():
+                child.destroy()
+            colours = {"FAIL": BAD_COLOR, "WARN": WARN_COLOR, "INFO": FG_MUTED}
+            if not findings:
+                findings = [("INFO", "none -- nothing on this wire looks "
+                                     "unhealthy")]
+            for sev, text in findings:
+                self.tk.Label(self.checks_card, text="[%s] %s" % (sev, text),
+                              bg=CARD_BG, fg=colours[sev], font=("Consolas", 8),
+                              justify="left", anchor="w", wraplength=380).pack(
+                                  fill="x", padx=4, pady=1)
+
     def _update_panels(self):
+        if self.view == "health":
+            self._update_health_panel()
+            return
         m = self.pipe.mission
         c = m.counters
         j = self.last_j
@@ -1194,6 +1893,10 @@ def main():
                     help="GUI smoke test on a committed capture")
     ap.add_argument("--headless", action="store_true",
                     help="no GUI; exit 1 on any decision mismatch")
+    ap.add_argument("--health", action="store_true",
+                    help="bench health check only (needs an H/T capture, i.e. a "
+                         "USE_MAZE_HEALTH build); exit 1 on any FAIL, 2 if the "
+                         "capture has no H lines at all")
     ap.add_argument("--oracle", default=DEFAULT_ORACLE,
                     help="path to brain_oracle.exe")
     ap.add_argument("--no-oracle", action="store_true",

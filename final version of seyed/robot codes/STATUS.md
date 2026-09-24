@@ -115,9 +115,11 @@ brain:               compile-only, -Werror, 0 warnings
 brain_oracle:        5 steps, 0 failed  (--selftest)   <- brain.c EXECUTED
 bt_monitor replay:   agree -> 0 mismatches, exit 0
                      disagree -> 1 mismatch, exit 1
+                     health_ok -> 0 health FAIL, exit 0
+                     health_fault -> 1 health FAIL, exit 1
 -----------------------------
-TOTAL:              21 unit tests + 1 oracle selftest + 2 replay checks,
-                    0 failed, 0 warnings
+TOTAL:              21 unit tests + 1 oracle selftest + 2 decision replays
+                    + 2 health replays, 0 failed, 0 warnings
 
 brain_host:        7/7 checks on 5 mazes (real_field, sample_maze 1-4)
                    run via: python scripts/run_brain.py <maze.json>
@@ -239,6 +241,17 @@ things to look at, in order of how much they matter:
    cannot tell "lane continues" from "I am on a blob" either. Separating them
    needs evidence over *distance* — the persistence trick `head_delay` already
    uses, mirrored — and that is a firmware decision, not a patch.
+
+   **A static test now exists (M1.5, 2026-09-23), and it needs no drive.** The
+   `J`-line test above requires a corner stop in a real run. The health build
+   instead lets you put the robot on a corner **by hand**, on the bench, and read
+   the panel: the `DERIVED` block prints `front = s[3..6]`, `L = S2 && front`,
+   `R = S7 && front`, `at_node = S0 && S9` from the raw ADC, so you can see
+   directly whether a hand-placed corner produces `(F=1, L=1, R=0)` or
+   `(F=0, L=0, R=0)`. It also settles the gate's AND-vs-OR question — a pose where
+   exactly one of `S0`/`S9` is over black is trivially arrangeable when nothing is
+   moving. Both are facts about the robot; neither is a fixture, so neither is
+   circular.
 1. **Drift.** `dist_cm` should snap to whole 20 cm cells with a small residue that
    does not grow. A climbing drift means the counts-per-cell constant is wrong and
    the time-optimal planner is reasoning over a distorted map.
@@ -296,7 +309,8 @@ path costs exactly nothing.
 | Build | Flash | RAM |
 |---|---|---|
 | Brain-driven (plain) | 40820 / 65536 (62%) | 6832 / 8192 (1360 free) |
-| Brain-driven + telemetry | 41792 / 65536 (63%) | 6904 / 8192 (1288 free) |
+| + health **bench** (`USE_HEALTH=1`, adds `HEALTH_ONLY`) | 41560 / 65536 (63%) | 6848 / 8192 (1344 free) |
+| + telemetry, which includes health, and can still run | 42264 / 65536 (64%) | 6912 / 8192 (1280 free) |
 
 **The `J` line gained three fields** (`target`, `dist_cm`, `node`) and a new
 **`B` line** was added for the bring-up decision, so captures from a build
@@ -306,6 +320,86 @@ rather than silently skipping them.
 **Status: built, compiles with the real ARMCC 5, links, wire format verified on
 the host.** The *measurements themselves* need the robot; nothing in this repo
 can produce them. See `BUILD_GUIDE.md` for the line format.
+
+---
+
+### Milestone M1.5 — bench health check ✅ built, awaiting robot time
+
+M1 answers *what the robot decided* while driving. It does not answer *what the
+hardware reads* while stopped — the M1 gate is `loop_start != 0`, so a parked or
+pre-KEY1 robot is silent, and `brain_host.c` drives the brain from a **model**, so
+a wrong model is invisible to it. M1.5 is the second question.
+
+```bash
+USE_HEALTH=1    bash scripts/build_firmware.sh   # BENCH: also defines HEALTH_ONLY
+USE_TELEMETRY=1 bash scripts/build_firmware.sh   # both -- the one to flash to run
+python scripts/bt_monitor.py                     # health panel is automatic
+python scripts/bt_monitor.py --replay cap.txt --headless --health   # exit 1 on FAIL
+```
+
+Two lines, sent **only while stopped** (`loop_start == 0 || loop_start >= 7`):
+
+```
+H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>      20 Hz
+T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max       ~0.35 s, cycling
+```
+
+`H` is 25 fields, `T` is 21. `TLM_DRIVING()` is the single predicate that keeps
+the health sender and the mission sender from ever calling `BLT_SendData()` in one
+pass; a queued `J`/`Z` event always wins its slot.
+
+**`USE_HEALTH=1` is the bench build, and it cannot run a mission.** It also defines
+`HEALTH_ONLY`, which makes the pre-KEY1 boot loop never exit. KEY2 drives the IR
+calibration, KEY3 the gyro one, and KEY1 only re-sends the banner. A bench session
+therefore leaves `loop_start` at **0 forever** — and that is the point: it is the
+proof `HEALTH_ONLY` took. Anything else means the mission started.
+`USE_TELEMETRY=1` deliberately does **not** define it; that build has to be able to
+drive.
+
+**The robot announces itself.** On reset the unconditional `Hi ,mmdi` banner at
+`main.c:1313` goes out ~300 ms after power-up — usually before anyone has
+connected, which is why the IRQ now answers too: under `USE_MAZE_HEALTH` *any*
+received byte sets `health_hello`, `health_tick()` replies with the same banner, and
+`SerialSource.send()` gives the app its first-ever TX path (probe on connect + a
+**Ping robot** button). This is the only line on the wire that can be a *reply*, so
+it is the only proof the link works in both directions — a silent bar proves
+nothing, because the robot streams whether or not anyone is listening.
+
+**The app now keeps a TERMINAL** (bottom strip): banner, unparsed lines, key edges,
+threshold changes, plan dumps, link open/close/errors. The 20 Hz stream is filtered
+out of it deliberately — it would bury the banner within a second. A **STATE** card
+shows `loop_start` and its name (`parse_telemetry.LOOP_STATES`, shared with the
+offline report).
+
+**The view draws the BOARD, not a sensor bar.** The pads are a **ring** round the
+perimeter: the front row `S2…S7` with the side pads `S1`/`S8` set back behind them,
+`s[0]`/`s[9]` **side by side on the rotation axis** at the robot's centre, then the
+mirror image at the back with the rear bank's indices running the other way
+(`S17…S10` left to right). One definition: `parse_telemetry.PAD_CELL` (a grid cell
+per pad) — the canvas scales it, the text report prints it. The grid is **portrait**
+(29 rows × 17 columns ≈ the board's 570 × 335 mm), because a board drawn wider than
+it is tall is a robot that does not exist and it hides where the axis pads sit; the
+canvas draws the board outline, the dashed centre line and the pads, and the pad's
+name and ADC are the only words on it — the derived summary, the role legend and
+the caveats live on the cards beside it, not under the picture. That replaces a
+two-row bar that had `S0`/`S9` at the outer ends of a ten-wide front row, which a
+first pass at a top view suggested and the board itself contradicts; SENSORS.md §2
+had it right all along.
+
+**Deliberately not sent: the `s[]` mask.** On the bench `s[]` is still all-zero
+(the hysteresis block lives in the superloop; the one-shot init runs only after
+KEY1), so it would be a fresh third derivation, not the firmware's own value. The
+app derives the bit from `adc` vs `mid` and labels it as derived.
+
+**It also fixed a dead gesture.** `KEY3`'s gyro calibration in the boot loop only
+set `GyroCalF`, and the sole consumer of that flag is `Calculate_Z_Angle()`, which
+ran only from the superloop — so it did nothing until KEY1, which then started a
+fresh calibration anyway. `health_tick()` calls it in the boot loop.
+
+**Status: built, links, the whole verdict path asserted both ways.** The two
+fixtures are **synthetic** (`scripts/make_health_fixtures.py`) and test the tools,
+not the robot — a fixture cannot answer "are the sensors healthy". That question
+is what the robot is for.
 
 ---
 
@@ -321,6 +415,7 @@ robot codes/
 │   ├── field_to_maze.py        ✅  (Real field image → maze .json + overlay)
 │   ├── parse_telemetry.py      ✅  (M1 capture → counts/cell, sensors, windows)
 │   ├── bt_monitor.py           ✅  (LIVE Bluetooth capture + virtual-brain check)
+│   ├── make_health_fixtures.py ✅  (Regenerate the two synthetic health captures)
 │   └── run_brain.py            ✅  (Brain host test — robot-model driver)
 ├── inc/
 │   ├── maze_types.h            ✅
@@ -349,7 +444,9 @@ robot codes/
 │   │                                virtual brain. --selftest; no maze needed)
 │   ├── fixtures/
 │   │   ├── capture_agree.txt    ✅  (replay fixture — 0 mismatches)
-│   │   └── capture_disagree.txt ✅  (one field altered — exactly 1 mismatch)
+│   │   ├── capture_disagree.txt ✅  (one field altered — exactly 1 mismatch)
+│   │   ├── capture_health_ok.txt    ✅  (SYNTHETIC — 0 health FAIL)
+│   │   └── capture_health_fault.txt ✅  (SYNTHETIC — 1 health FAIL, exit 1)
 │   └── brain_host.c            ✅  (7/7 on 5 mazes — robot model, not a replayer)
 ├── SENSORS.md                  📋  Sensor map: s[i] ↔ silkscreen ↔ MUX ↔ role
 ├── BUILD_GUIDE.md              📋
@@ -384,6 +481,11 @@ python scripts/bt_monitor.py --demo                           # GUI smoke test, 
 Needs `pip install pyserial` for the serial path only — `--replay` and `--demo`
 work without it. Records raw `.txt` + `.csv` + `.json` into `build/bt_captures/`.
 
+Add `--health` for the **bench health view/report** instead of the mission check:
+keys, all 18 raw `IR_ADC[]`, `IR_mid/min/max` and the gyro, drawn in the physical
+bar layout. Exits 1 on any FAIL, **2** if the capture contains no `H` lines (so
+"nothing to check" cannot read as a pass).
+
 ### Manual (rarely needed)
 ```powershell
 # Add GCC to PATH (once per session)
@@ -414,6 +516,14 @@ build/brain_oracle.exe --probe        # print the same steps, unchecked
 - **Sensor branch discovery** in `maze_solver_update_position()` now runs for ALL nodes (not just new ones), creating placeholder neighbor nodes at 20 cm offset for each detected open path.  Back is skipped (the return edge is created when the robot physically drives between nodes).  Heading=NONE defaults to NORTH for the first sensor reading.
 - **The seam is `brain_step()`, not a HAL.** The brain is a pure decision function — `BrainIn` in, one `'F'/'L'/'R'/'B'` out — and the firmware keeps all sensing and all motion. It never reads a sensor, motor, encoder or compass, and it holds no firmware pointer. `maze_hal.h` proposed the opposite (the solver driving the robot through `maze_hal_tick()` while the legacy explorer kept its own map) and is deleted; two integration points for one job meant two RAM budgets. See `inc/brain.h`.
 - **The brain owns the map, the firmware owns the robot.** `maze_hal.h`'s HAL used to declare the firmware's `link[][]` / `node[][]` as `extern` so the solver could read them. Those arrays are gone; nothing in the library reaches into the firmware now.
+- **The health stream carries raw `IR_ADC[]`, never the firmware's `s[]` mask.** On the bench `s[]` is all-zero (the hysteresis block lives in the superloop; the one-shot init runs only after KEY1), so streaming it would publish a *third* derivation rather than the firmware's own value — and a reader would take it for the firmware's opinion. The app derives the bit from `adc` vs `mid` and labels it derived; the `S`/`J` lines stay the authority on what the firmware believed.
+- **No float `printf` in the firmware, ever** — one `%.1f` pulls 1-2 KB of the 64 KB flash for the float formatter. Scaled integers on the wire (×10 for deg/s and deg), divided once at parse time. This is why the health stream's gyro fields are integers.
+- **One `BLT_SendData()` per superloop pass.** The call restarts the TX DMA, so a second one before the first drains truncates the first — silently. This is why the health lines are short, why `T` is three ~106-byte lines rather than one 290-byte line, and why the health sender is gated on `!TLM_EVENT_PENDING()` so a queued `J`/`Z` always wins its slot. It is also why `health_mute_until` stands the stream off for 40 ms after `calibr_ir()` prints its own `IR_mid` dump.
+- **`HEALTH_ONLY`'s boot loop uses a `static volatile _Bool bench_leave`, not a bare `for(;;)`.** With a provably-infinite loop ARMCC emits `#128-D: loop is not reachable`, everything after the loop is eliminated, and flash silently drops from ~41.5 KB to 39492 B because the whole mission got thrown away — the warning was the only sign. A `#pragma` would hide the fact that the code after the loop is still wanted; a volatile the compiler cannot fold keeps it alive *and* keeps the zero-warning rule. Do not "simplify" this to `for(;;)`.
+- **The app's TERMINAL is an event log, never a raw dump of the wire.** At 20 lines/s the health stream would push the `Hi ,mmdi` banner — the one line that can be a *reply*, and so the only proof the link works both ways — off the top within a second. `H`/`S` are therefore filtered out of it and drawn in the bar/panel instead. `_log_line()` matches on `Pipeline.feed`'s tag, not `parse_line`'s verdict, because a non-record line is re-tagged on the way through (the banner arrives as `CHATTER`).
+- **`parse_telemetry.PAD_CELL` is the ONE definition of the sensor geometry — a grid cell per pad — and both the canvas and the text report are drawn from it.** Do not add a second layout, and do not go back to "rows": the pads are a **ring** (`S0`/`S9` on the rotation axis at the robot's centre, `S1`/`S8` set back behind the front row, the rear bank running `S17…S10`), and any row-shaped model puts `S0`, `S1`, `S8`, `S9`, `S10` or `S17` in the wrong place. The grid is **portrait** (`BOARD_ROWS`/`BOARD_COLS` = 29/17 = 1.71, the board's own 570/335) — the drawn rectangle has to have the robot's shape, so a wide grid is a bug, not a style. `TARGET_ROW`/`REAR_TARGET_ROW` stay in index order and are unaffected — the target test is order-blind. Read `PAD_CELL`'s comment before changing any of it.
+- **The health canvas carries no words of its own beyond each pad's name and ADC.** The derived summary, the role words, `loop_start` and the "a green strip is not a verdict" caveat all live on the right-hand cards (`DERIVED`, `HEALTH`, `STATE`), and they were removed from under the board once they were shown to be duplicating them — a picture with a page of footnotes under it is a picture nobody reads. Do not add a caption back to the canvas: put it on a card.
+- **The right panel scrolls, and the THRESHOLDS table scrolls inside it.** The column of cards requests ~780 px against the ~580 the 800 px window leaves it (toolbar 39 + TERMINAL 148), and the card that falls off the bottom is CHECKS — the verdict. So the cards are on a scrolling canvas, and the 19-row thresholds table has its own scrollbar with a fixed 10-line height rather than growing. `_panel_wheel` routes the wheel by what is under the pointer (a `Text` scrolls itself; anything else inside the right panel scrolls the panel); it is explicit because Tk's own Text binding would scroll the table *and* the panel under it on one notch. Any card fed from the 30 ms tick must use `_set_scroll_text`, which rewrites only on a real change and carries the scroll position over — re-inserting identical text every frame fights the operator's scrollbar.
 
 ## Key reference files
 

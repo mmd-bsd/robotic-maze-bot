@@ -145,6 +145,495 @@
 
 ## History (newest first)
 
+### 2026-09-23 — The health panel scrolls, and the THRESHOLDS table scrolls inside it
+
+**What changed.** `bt_monitor.py`'s right-hand panel could not fit its own cards.
+Measured, not guessed: the toolbar takes 39 px and the TERMINAL strip 148, so the
+panel gets about **581 px** of the 800 px window, and the six health cards request
+**783 px** on a capture with findings (STATE 51 + KEYS 130 + DERIVED 40 + GYRO 55 +
+THRESHOLDS 144 + CHECKS 141, plus six card headings). About 200 px were below the
+fold, and the card that fell off the bottom was **CHECKS — the verdict**, the one
+thing the bench build exists to produce.
+
+Two scroll regions now:
+
+1. **The card column is a scrolling canvas** (a `Canvas` + inner `Frame` +
+   `Scrollbar`, the standard Tk pattern: each is told its size by the other's
+   `<Configure>`). Nothing is unreachable, and the same fix covers the mission
+   panel, which requests 641 px for the same 581.
+2. **THRESHOLDS has its own scrollbar** (`_scroll_card`) and a fixed 10-line
+   height, so the 19-row table does not push CHECKS off the panel it was already
+   falling off. Fixed height rather than "grow to fit" is the point: the rows that
+   were being clipped are the high-index pads, which is exactly who an operator
+   scanning for a dead sensor has not looked at yet.
+
+**The wheel routes by what is under the pointer** (`_panel_wheel`), and is
+explicit rather than left to Tk, whose own Text binding would scroll the table AND
+the panel under it on a single notch: a `Text` scrolls itself (the THRESHOLDS
+table, and the TERMINAL strip); anything else that is a descendant of the right
+panel scrolls the panel; anything else does nothing. Verified by spying on the
+calls — card → panel, table → table only, toolbar → neither.
+
+**The scrolling card is rewritten only when its text changes** (`_set_scroll_text`).
+It is fed from a 30 ms tick, and re-inserting the same 19 lines every frame would
+fight the operator's scrollbar and reset the view under their hand. T lines stop
+changing once the calibration settles, so the guard costs nothing. The scroll
+position is carried across an update for the same reason. (Same discipline as the
+CHECKS card's `_checks_sig`, which was already rebuilding only on change.)
+
+**Also:** the two `wraplength=400` labels became 380, because the panel's
+scrollbar and the card padding leave ~395 px of usable width and a 400 px wrap
+would have run under the scrollbar.
+
+**Files:** `robot codes/scripts/bt_monitor.py` only (`_build`, `_scroll_card`,
+`_set_scroll_text`, `_panel_wheel`, `_update_health_panel`, three wraplengths).
+
+**Verified:** the four headless exit codes unchanged (health ok `0`, fault `1`,
+agree `0`, disagree `1`); the mission panel still builds and updates inside the new
+holder (the brainin card fills, the scrollregion is 377 × 641); the thresholds
+table reports 19 lines against a 10-line window and keeps its scroll position
+across three ticks; the empty state ("no T line yet") still renders. The
+`brain_oracle` **link** was verified separately to `build/brain_oracle_check.exe`
+— `build_all.ps1`'s only failure is that its destination is held open by the
+running app, which is not a regression.
+
+### 2026-09-23 — The board is drawn PORTRAIT, and the canvas says nothing but the pads
+
+**What changed.** Three things the operator asked for, all in the health view
+(`bt_monitor.py`, drawn from `parse_telemetry.PAD_CELL`):
+
+1. **The board is long and narrow now, not wide.** The grid went from 21 × 8 to
+   **17 × 29** — `BOARD_ROWS`/`BOARD_COLS` = 1.71, against the board's own
+   570 mm / 335 mm = 1.70. The old grid was wider than it was tall, which drew a
+   robot that does not exist; the rotation axis pads at mid-length were squashed
+   into the middle of a squat rectangle, so the one thing the picture exists to
+   show (`S0`/`S9` are *at the centre* of a *long* robot) was the one thing it
+   did not show.
+2. **The two motor rectangles are gone**, and so is the **red `TARGET U` caption**
+   under the front bank.
+3. **Everything under the board is gone**: the derived summary (`front`/`left`/
+   `right`/`at_node`/`target`), the role legend, the `loop_start=… head=…` line
+   and both "SAYING THE QUIET PART" warnings. The canvas now carries **only** each
+   pad's name and ADC inside its cell, plus the role strips under them.
+
+**Why the words went.** Not a loss of function — a loss of *duplication*. Every
+one of them is already on the cards to the right (`DERIVED` prints
+`F… L… R… at_node=… target=…` from the same `model.derived()`, `STATE` prints
+`loop_start` and names it, `HEALTH` carries the role names), so the canvas was
+showing a second copy of data the panel was already showing, and the copy was
+pushing the picture into the top-left corner of its own pane. The pad cells keep
+their two labels because without them the drawing says nothing at all.
+
+The role strips are now the one thing on the canvas that needs a key, and the key
+is `ROLE_TAG`/`ROLE_COLOUR` in the source — the same four roles in the same four
+colours as the HEALTH card's rows, which is where the words are.
+
+**Trade-off accepted:** the target-U is now a **dashed box around the eight pads**
+with no words on it. The caption used to say which bank and why (eight pads, all
+black at once, `main.c:1266-1267`). The box still shows *which* eight — it moves
+to the rear bank when `head=1` — and the `DERIVED` card still prints `target=`,
+but "all black at once" is only in `SENSORS.md` §2 now, not on the screen.
+
+**The text report had to change with it.** `_health_bar()` printed one line per
+grid row; on a 29-row grid only 5 rows hold pads, so it would have been 24 blank
+lines of margin burying the five that matter. It now keeps **one** blank line per
+gap — the gaps are part of the picture (the axis pads really are a long way back
+from the front row), but one line carries that, and twenty-four does not.
+
+**Files:** `robot codes/scripts/parse_telemetry.py` (`PAD_CELL`, `BOARD_COLS`/
+`BOARD_ROWS`, `_health_bar`), `robot codes/scripts/bt_monitor.py`
+(`MonitorApp._draw_health`), plus `SENSORS.md` §1/§3, `STATUS.md` (the health-view
+paragraph and a new design-decision bullet), `BUILD_GUIDE.md` step 7. No firmware,
+no solver, no wire format — the drawing only.
+
+**Verified:** the four headless exit codes unchanged (health ok `0`, health fault
+`1`, decision agree `0`, decision disagree `1`); a headless canvas render of the
+ok fixture gives 75 items, 18 pads at 29 × 28 px and **0 overlapping pad pairs**,
+with the pad names and ADCs the only text on the canvas. The firmware was **not**
+rebuilt — nothing here is in it, and the operator builds in Keil.
+
+**Lesson.** The drawn rectangle's *shape* is a claim about the robot, not a style
+choice — and a wrong one silently moves the pads that carry the argument. Two of
+the three corrections in this file's recent history were about pad *order*; this
+one is about pad *position*, and it was wrong for the same reason the others were:
+inferred from the grid rather than measured off the board.
+
+### 2026-09-23 — The pads are a RING, not two rows: `S0`/`S9` sit on the axis, and `PAD_CELL` is the only layout
+
+**What changed.** The sensor geometry, corrected a third time — and this time from
+the board itself. Both images were already in the repo: `specifiction/sens num
+order.jpg` (the top view with the pads numbered) and `New Start/robot
+sensore/sensores.png` (the bare board). Neither had reached the session, which is
+why the previous two attempts were inferred from text and both came out wrong. The
+answer was on disk the whole time.
+
+What the board shows, in the user's own words as well:
+
+```
+                     FRONT EDGE OF THE ROBOT
+         S1                                    S8       side pads, set back
+           S2   S3   S4   S5   S6   S7                 the front row (six)
+                     S0          S9                    ON THE AXIS OF ROTATION
+   [===== left motor =====][===== right motor =====]    the axis runs between
+         S17                                   S10      them, at the centre
+           S16  S15  S14  S13  S12  S11                 the rear row (six)
+                     REAR EDGE OF THE ROBOT
+```
+
+- **`s[0]` and `s[9]` are side by side ON the rotation axis**, at the robot's centre
+  — not the outer ends of a ten-wide front row. `SENSORS.md` §2 had this right from
+  the start; the reading that contradicted it was the wrong one, and §2's ⚠
+  RE-OPENED note is withdrawn and replaced with a confirmation.
+- **`s[1]`/`s[8]` are the side pads**, set back behind the front row: `s[1]` under
+  `s[2]`, `s[8]` under `s[7]`. So the eight target pads form a **U**, not a line —
+  which is how a 128 mm disc blacks all eight at once.
+- **The rear bank runs `S17…S10` left to right**, the mirror of the front, its
+  indices the opposite way round.
+- The U's outer arc `s[1]`…`s[8]` is what §1's ±2.5-pitch arithmetic is about, and
+  it is symmetric about **4.5** exactly as §1 says. **Nothing in §1 needed
+  changing** — only the word "row" was doing two jobs, and it was read as a literal
+  row of ten.
+
+**One definition, and it is a grid.** `parse_telemetry.PAD_CELL` maps each index to a
+`(column, row)` cell on a `BOARD_COLS`×`BOARD_ROWS` board, front at row 0. The GUI
+canvas scales those cells to pixels — drawing the board outline, the two motors and
+the dashed rotation axis *under* the pads — and the text report prints the same grid
+as an ASCII board, so the screen and `parse_telemetry.py` cannot disagree.
+`FRONT_ROW_DRAW`/`REAR_ROW_DRAW` are deleted: they were the wrong shape.
+`TARGET_ROW`/`REAR_TARGET_ROW` stay in index order and are untouched.
+
+> **Later the same day:** the grid became **portrait** (17 × 29, not 21 × 8), the
+> **motors were removed** from the drawing and every caption under it with them.
+> The pad *positions* above are unchanged; only the shape they are drawn on is.
+> See the entry at the top of the history.
+
+**Still open, and now sharper for it.** Because the rear bank's indices run reversed,
+the `+9` mirror lands the firmware's rear **left** branch detector `s[11]` at the
+rear row's **right** end, under the front row's right side. Either the rear bank is
+mounted mirrored on the board or the firmware's rear left/right is swapped. That is
+one look at the robot on the bench (`SENSORS.md` §3, item 3) and it is the one
+question this correction *raises* rather than settles.
+
+**Files.** `robot codes/scripts/parse_telemetry.py`, `robot codes/scripts/bt_monitor.py`,
+`SENSORS.md` (§1, §2, §3), `STATUS.md`, `BUILD_GUIDE.md`, this file.
+
+**Verified.** `build_all.ps1` exits 0 (21 unit tests + oracle selftest + 2 decision
+replays + 2 health replays); the four headless exit codes are unchanged (health ok
+0, health fault 1, agree 0, disagree 1); the canvas health view renders headless over
+both health fixtures (105 items) and still falls back to its "waiting for the first
+`H` line" placeholder on a mission capture.
+
+**Lesson.** Twice burned on an inferred geometry, the third attempt should have
+opened the images first. A question the user answers with "it is in the file I gave
+you" is not an ambiguity to be resolved by reasoning harder.
+
+### 2026-09-23 — ~~The sensor bar redrawn from the TOP VIEW: the front row is TEN pads, `S0`/`S9` are its outer ends~~ **SUPERSEDED the same day**
+
+> **This entry is wrong.** The board reading below was taken from a top view at a
+> resolution that could not carry it, and it contradicts `SENSORS.md` §2, which was
+> right. **The current layout is the entry above** — a ring, with `S0`/`S9` on the
+> axis. Kept because the reasoning is instructive, not because any of it stands.
+
+**What changed.** The health bar's geometry, again — and this time the fix was to
+stop inferring the layout and take it from the robot.
+
+The user's reading of the **top view**: `S0` and `S1` are on the **left side** of the
+robot, `S8` + `S9` + `S10` on the **right side**, and `S17` is **left** again. Written
+out:
+
+```
+   front row, left to right   S0  S1  S2  S3  S4  S5  S6  S7  S8  S9    TEN pads
+   rear row,  left to right   S17 S16 S15 S14 S13 S12 S11 S10            EIGHT
+                                      ^ under the front's S1..S8 columns ^
+```
+
+- **The front row is ten pads wide, and `S0`/`S9` are its two outer ends.** The
+  previous drawing had eight cells (`S1..S8`) across the full width of the bar and
+  drew `S0`/`S9` as a centred pair *between* the rows. That is why `S1` and `S8`
+  were reported in the wrong columns: the eight target pads are the **middle** eight
+  of a ten-wide row, not the whole row.
+- **The rear row is eight pads**, centred under the front row's middle eight columns
+  (a one-cell indent) — and it still reads `S17…S10`, the opposite way round.
+- `parse_telemetry.FRONT_ROW_DRAW = range(10)` joins `REAR_ROW_DRAW` as the single
+  definition; both the text bar in the report and the GUI canvas take their rows
+  from them.
+
+**Why this is the right geometry and not just the user's preference.** A ten-wide
+front row is symmetric about index **4.5**, which puts the branch detectors `s[2]`
+and `s[7]` at exactly −2.5 and +2.5 pitches — the relation `SENSORS.md` §1 already
+uses to *derive* the 10/8 bank split. An eight-wide front row would have its centre
+at 4.0 and be lopsided. So the drawing and the derivation agree, which they did not
+before.
+
+**What this re-opens — deliberately, not silently.** `SENSORS.md` §2 carries a
+correction, also attributed to a measurement on the robot, that `s[0]`/`s[9]` "sit in
+the middle of the robot, on the axis of rotation". A pad cannot be both an outer end
+of the front row and in the middle of it. The top-view reading is the newer one and
+is what everything now draws, so **§2's sentence is left standing and flagged** with
+a ⚠ rather than rewritten, because §2's load-bearing conclusion — that `s[0] && s[9]`
+is the *arrival* test, "the rotation axis is over the node" — is built on it. If
+`S0`/`S9` really are the row's ends, the gate means "there is a lateral line under
+the full width of the bar", which is still false on a plain straight (so the gate
+still works), but is a subtler claim than §2 makes. **Settle it by looking at the
+robot**; §3's bench list now carries it as item 4, flagged as the one to do first.
+
+**And it sharpens the rear-bank question.** With the rear row's index order running
+opposite to the front's, the `+9` mirror lands `s[11]` — the firmware's rear **left**
+branch detector — over the front row's **right**-branch column (`S7`), and `s[16]`
+over the left one. Either the rear bank is mounted mirrored, or the firmware's rear
+left/right is swapped. Both plausible; neither established. Already open in §3 as
+item 3, now with the arithmetic spelled out.
+
+**Files.** `robot codes/scripts/parse_telemetry.py`, `robot codes/scripts/bt_monitor.py`,
+`SENSORS.md`, `STATUS.md`, this file.
+
+**Verified.** Report bar and GUI canvas both redrawn and smoke-tested over all four
+fixtures (no exceptions, 119 canvas items on the health view); `build_all.ps1` still
+exits 0 (21 unit tests + oracle selftest + 2 decision replays + 2 health replays).
+
+**Lesson.** This is the second layout correction in one day, and both came from the
+same root cause: a drawing whose geometry was *inferred* from index arithmetic rather
+than *measured* on the board. The index arithmetic (`s[0]` at one end, `s[9]` at the
+other) turns out to be the better guide here — but only because it independently
+predicts the same ten-wide row the user can see. Where the two disagree, the robot
+wins, and the disagreement gets written down as a question instead of resolved by
+whichever file was edited last.
+
+### 2026-09-23 — Bench mode: the robot says `Hi` on connect, the bar matches the board, and the app keeps a terminal
+
+**What changed.** Four things asked for after the first look at the health build on
+the bench: the drawn sensor bar did not match the robot, the robot never announced
+itself, and there was no way to sit the robot down in diagnostics without it trying
+to run.
+
+**1. The health bar now draws the robot's real layout.** `S1`, `S8`, `S10` and `S17`
+were in the wrong places and the rear row ran the wrong way round.
+> **Superseded later the same day** — the row geometry in this item was still
+> inferred, and was corrected twice more. See the topmost entry for the current
+> layout: the pads are a **ring**, with `S0`/`S9` on the rotation axis.
+
+- The front row reads `S1..S8` left to right; the **rear row reads `S17..S10`**.
+  The two rows are silkscreened opposite ways round, and the app had been drawing
+  both the same way.
+- `S0`/`S9` stay between the rows as a centred pair — not at the ends, and never
+  under a pad column (that would invent a position nobody measured).
+- The one place this is written down is **`parse_telemetry.REAR_ROW_DRAW =
+  reversed(REAR_TARGET_ROW)`**, and both the report's bar and the GUI's canvas take
+  the row from it. `REAR_TARGET_ROW` is left alone on purpose: drawing order and
+  target-test order are different questions — the target test is order-blind.
+- The canvas prints the row order on the pane, so the next reader cannot re-derive
+  it wrong.
+
+> **Consequence to check on the bench.** If the rear silkscreen really does run
+> opposite the front's, then `s[11]` — the firmware's rear **left** branch detector —
+> is the cell at the **right** of the drawn row. Either the board is mirrored or the
+> firmware's rear left/right is swapped. The DERIVED card shows what it reads;
+> parking the robot on a known right-hand corner and seeing which rear cell is lit
+> is the check. **Not resolved here**, and the app does not guess.
+
+**2. `HEALTH_ONLY` — the bench build.** The pre-KEY1 boot loop never exits, so the
+robot **cannot** start a mission whatever is pressed. KEY2 drives the IR
+calibration, KEY3 the gyro one, and KEY1 becomes an inert "send the banner again"
+button. `USE_HEALTH=1` now means this; `USE_TELEMETRY=1` does **not** imply it —
+that is the bring-up build and it has to be able to run.
+
+The loop is `for (;;)` with an `if (bench_leave) break;` inside, where `bench_leave`
+is a `static volatile _Bool`. That is deliberate and not a decoration: without a
+volatile the compiler proves the loop infinite, everything after it becomes
+unreachable, ARMCC emits `#128-D: loop is not reachable`, and **flash silently drops
+from ~41.5 KB to 39492 B because the whole mission got eliminated**. The warning was
+the only sign. Fixing it with a `#pragma` would have hidden the fact that the code
+after the loop is still wanted; a volatile the compiler cannot fold keeps the zero
+warning rule *and* keeps the code.
+
+**3. The link handshake — `Hi ,mmdi` in both directions.**
+- **On reset**: the banner at `main.c:1313` is unconditional and always was. It
+  fires ~300 ms after power-up, i.e. usually *before* anyone has connected — which
+  is precisely why (b) exists.
+- **On connect**: `USART1_IRQHandler` read `USART1->RDR` into a variable and threw it
+  away (its only action was commented out). Under `USE_MAZE_HEALTH` it now sets
+  `health_hello` instead, and `health_tick()` answers **any** received byte with the
+  same banner, clearing `health_due` so a stream line cannot collide with it.
+- `SerialSource.send()` is the app's first-ever TX path, and `_ping()` uses it —
+  automatically on connect, and again from the terminal's **Ping robot** button.
+- The banner is the only thing on the wire that can be a *reply*, so it is the only
+  proof the radio works in both directions. A silent bar proves nothing: the robot
+  streams whether or not anyone listens, so a mis-paired port looks exactly like a
+  robot holding still.
+- `health_mute_until = tlm_ms + 40` stands the stream off briefly after `calibr_ir()`
+  prints its own `IR_mid` dump — one `BLT_SendData()` per pass, and that dump is not
+  a health line.
+
+> **The banner is answered only in a health build.** A plain `bash
+> scripts/build_firmware.sh` build has no probe answer; the boot banner still goes
+> out on reset.
+
+**4. A terminal pane, and `loop_start` named.** The app kept no event log at all.
+- New **TERMINAL** strip (bottom of the window, packed before the body so it gets
+  its space) showing: the banner, every unparsed line, key **edges**, threshold
+  changes, plan dumps, and link open/close/errors. `H` and `S` lines are filtered —
+  at 20 Hz they would bury the banner within a second, which is the opposite of what
+  the banner is for.
+- `_log_line()` matches on `Pipeline.feed`'s tag, **not** `parse_line`'s verdict: a
+  non-record line is re-tagged on the way through, so the handshake arrives as
+  `CHATTER`. `plan_line`'s `PLAN` / `PLAN-MISMATCH` are logged too — that comparison
+  is the check that `set_plan()`'s copy did not corrupt the string.
+- A **STATE** card sits at the top of the health panel showing `loop_start` *and its
+  name*, plus `head` and the live key mask. `parse_telemetry.LOOP_STATES` /
+  `loop_state()` is the one naming, shared with the offline report, which now prints
+  the same `= %s`.
+- On the bench `loop_start` **stays 0 forever** — and that is the point: it is the
+  proof `HEALTH_ONLY` worked. Anything other than 0 means the mission started.
+
+**Sizes.** As last measured, zero warnings in all three: plain 40820 / 6832,
+`USE_HEALTH=1` 41560 / 6848, `USE_TELEMETRY=1` 42264 / 6912. Keil reports its own.
+
+**Files.** `firmware/Core/Src/main.c`, `robot codes/scripts/parse_telemetry.py`,
+`robot codes/scripts/bt_monitor.py`, `robot codes/scripts/build_firmware.sh`,
+`BUILD_GUIDE.md`, `SENSORS.md`, `STATUS.md`, `ARCHITECTURE.md`, this file.
+
+**Lesson.** Two of the four asks were bugs in *the app*, not the firmware — the bar
+had been drawing a plausible-looking layout that no one had checked against the
+board. A drawing that is not traceable to a measurement is a guess with a picture
+around it, which is why `REAR_ROW_DRAW` now carries the reason rather than just the
+tuple. And the `#128-D` episode is worth remembering in both directions: a warning
+that looks like pedantry was the only evidence that 2 KB of logic had been thrown
+away.
+
+### 2026-09-23 — The bench health check: keys + 18 IR + gyro, live over Bluetooth, while the robot is stopped
+
+**What changed.** A second compile-time telemetry mode, `USE_MAZE_HEALTH`, and the
+monitor app's health view to read it.
+
+- **`firmware/Core/Src/main.c`** — a `USE_MAZE_HEALTH` block (`health_div`,
+  `health_due`, `health_slot`, `health_keys()`, `health_send()`, `health_tick()`)
+  sending two new lines **only while the robot is stopped**:
+
+  ```
+  H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>      20 Hz
+  T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max       ~0.35 s, cycling
+  ```
+
+  `health_tick()` runs in the pre-KEY1 boot loop **and** in the superloop's stopped
+  states (`loop_start == 0 || loop_start >= 7`), before the mission TX slot and
+  gated on `!TLM_EVENT_PENDING()`. `TLM_DRIVING()` (`loop_start != 0 && loop_start < 7`
+  under health) is the one predicate that keeps the two senders from ever calling
+  `BLT_SendData()` in the same pass. The `tlm_ms`/`tlm_due`/`tlm_pending` timebase
+  guards were widened to `#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)`
+  and a 50 ms divider added to the TIM14 ISR; no new buffer (it reuses
+  `BLT_TX_Buffer`) and **no new state** beyond two counters.
+- **`scripts/parse_telemetry.py`** — `H`/`T` in `parse_line()`, and a new
+  **`HealthModel`** which is the *only* place the health checks are written down, so
+  the GUI, `--headless` and the offline report cannot disagree. Per-channel
+  min/max/span/change-count, key edge history, last `T`, and findings in three
+  severities. Plus `health_report()` (`--health`), `build_health_model()`,
+  `_health_bar()` and `sensor_short_role()`.
+- **`scripts/bt_monitor.py`** — `Pipeline` feeds `H`/`T` to a `HealthModel` and
+  nowhere near the mission state machine (an `H` line must not advance the robot's
+  believed position); CSV gains `keys`/`loop`/`adc`/`what`/`val`; a **health
+  panel** that draws the physical bar in `SENSORS.md`'s layout — front `S1…S8`, the
+  rotation-axis pair `S0`/`S9` **centred between the rows**, rear `S10…S17` — with
+  each cell showing its raw ADC and its role; a `DERIVED` block printing what the
+  brain *would* be told at this pose; key indicators with an edge log; gyro as a
+  rate; and the findings colour-coded. The view auto-follows the data (`H`/`T` →
+  health, `S`/`J` → mission) with a toolbar override.
+- **`scripts/make_health_fixtures.py`** (new) + `test/fixtures/capture_health_ok.txt`
+  / `capture_health_fault.txt` (generated). One `emit()` writes both from one
+  schedule with only the planted faults varying, so a diff between them is a diff
+  between the faults.
+- **`scripts/build_all.ps1`** — the two health replays added to `$replays`
+  (`capture_health_ok.txt` → 0, `capture_health_fault.txt` → 1); the closing tally
+  now reads *21 unit tests + 1 oracle selftest + 2 decision replays + 2 health
+  replays*.
+- **Docs** — `BUILD_GUIDE.md` gained a `## Health check — USE_HEALTH=1` section (the
+  field tables, the bench procedure, the RAM/flash table); `SENSORS.md` gained the
+  **polarity** subsection in §1 and a new **§3 watching the roles live**;
+  `ARCHITECTURE.md` gained the two build flags in §4, the new script, and a
+  bring-up paragraph in §7.
+
+**Why.** Bring-up is the only work left, and the repo had **no way to look at the
+robot on the bench**. The M1 telemetry gate is `loop_start != 0`, so a robot
+standing still — before KEY1, or parked after a run — is silent; the live
+float/ADC dumps that would have covered it are all commented out
+(`main.c:1919-1958`). `brain_host.c` drives the brain from a *model* of the robot,
+so a wrong model is invisible to it, and the open `in.front` corner defect (root
+`CLAUDE.md`, rule 9) specifically needs the raw masks read off the real hardware.
+`--health` is also assertable, so the check itself is now tested in both
+directions.
+
+**The blind spot this closes.** "Does the brain decide correctly" and "does the
+hardware report what is there" were the same question in every tool the repo had.
+They are not: `brain_host`/`run_brain.py` answer the first against a model, and
+nothing answered the second. The health stream is the second, and it is
+deliberately **not** the brain's `s[]` mask — on the bench `s[]` is still all-zero,
+so a mask there would be a fresh third derivation rather than the firmware's own
+value. The app derives the bit from `adc` vs `mid` and labels it as derived.
+
+**Two decisions taken with the user:** entry is **auto while idle** (no key combo,
+no power-cycle dance, one flashed build does both jobs), and the scope is **keys +
+all 18 IR + gyro** — **not** the wheel encoders, which would need the GTD driver
+awake in the idle loop (`GTD_SLEEP(1)`, `main.c:1080`), a real behaviour change to
+a stopped robot.
+
+**Finding — the `KEY3` gyro calibration at boot was dead.** The gesture in the
+`while(KEY1==0)` loop only sets `GyroCalF`, and the sole thing that services that
+flag is `Calculate_Z_Angle()`, which ran **only** from the superloop. So the
+buzz-and-hold did nothing until KEY1 — at which point the boot sequence started a
+fresh calibration anyway. `health_tick()` calls `Calculate_Z_Angle()` in the boot
+loop, so KEY3 now works where it is offered. Scoped to the health build, so
+normal-boot behaviour is untouched.
+
+**Finding — the ADC polarity, derived from source and written down for the first
+time.** `s[i]=1` (**black**) when `IR_ADC[i] <= IR_mid[i]-50`; `s[i]=0` (white)
+when `IR_ADC[i] >= IR_mid[i]+50` (`main.c:1960-1967`), latched only after 5
+consecutive agreeing samples (`OffToOnTrsh`/`OnToOffTrsh`, `main.c:96-97`). So:
+
+> **Low ADC = black. High ADC = white.** `IR_max` is the **white** end and
+> `IR_min` the **black** end — the reverse of how the names read.
+
+That inverts both rails: a pad pinned at **0** reads BLACK for ever (a phantom lane
+or a whole phantom target row — the dangerous direction), one pinned at **4095**
+reads WHITE for ever (a dead phototransistor, i.e. a missing branch detector). The
+report's threshold columns are labelled `min=BLK` / `max=WHT` for this reason. The
+one-shot init just after KEY1 uses a **wider, asymmetric** band — black needs
+`adc <= mid-500`, white `adc >= mid+100` (`main.c:1344-1351`) — because at boot
+`IR_mid[]` is the power-on default `{1400,1200,1400,…}` (`main.c:90`), not anything
+the robot measured, and a loose black threshold would invent lanes out of the
+field's glare.
+
+**Bug caught by the fixture self-check — the `H` line is 25 fields, not 26.** The
+first draft of `parse_line()` said 26, which would have marked **every real health
+line BAD**. `make_health_fixtures.py` refuses to write a fixture that does not
+round-trip through `parse_line`, so it failed loudly at generation time instead of
+silently on the robot. Verified by arithmetic and by reading the firmware's own
+`sprintf` (`"H,%lu,%X,%d,%d,%d,%d"` + an 18-value loop = 7 + 18).
+
+**Also fixed while here — a zero-pinned channel produced *no* finding.** The guard
+`if hi == 0 and lo == 0: continue` skipped the stuck-low case entirely, which is
+the most dangerous single-channel fault (a phantom black lane the brain can see and
+the robot cannot drive down). Now reported explicitly, unless all 18 are zero — in
+which case it is one FAIL about the array, not eighteen.
+
+**Deliberately not done:** per-pad WARNs for "this pad was never over black" (it
+demoted to one capture-level INFO after firing for 11 of 18 pads legitimately
+parked over white — "was this pad over black just now" is not knowable from the
+wire), and any change to `brain.c`, the solver library or the mission state machine.
+
+**Sizes.** plain **40820 / 6832**; `USE_HEALTH=1` **41444 / 6840** (+624 flash,
++8 RAM); `USE_TELEMETRY=1` **42196 / 6912** — all within 8192 B, zero warnings.
+
+**Lesson.** *A checker that only ever passes proves nothing.* The health check got
+the same two-sided treatment `build_all.ps1` already applied to the decision
+checker, and it paid for itself immediately: the only thing that caught the
+25-vs-26 field count was a generator that refuses to emit a fixture the parser
+cannot read back. **Generate the fault, do not hand-type it** — a hand-edited
+fixture drifts into a state nobody can justify, and then a green run means nothing.
+Also: the fixtures are **synthetic and say so in their own header**. "Are the
+sensors healthy" is precisely the question a synthesised file cannot answer, and
+the same honesty rule `capture_agree.txt` carries applies here with more force.
+
+---
+
 ### 2026-09-23 — "Corner" pinned down in the glossaries, and proof the two stop rows are exhaustive
 
 **What changed.** Docs only — no code, no firmware. `Corner` is now a glossary
@@ -1612,8 +2101,9 @@ no VLAs or C11-only constructs. **31 tests still pass.**
 - **Solver phases:** `EXPLORE → RETURN_HOME → FAST_RUN → DONE`.
 - **Fastest route:** minimum-time, accel-aware, on the discovered map; proof is
   time-based and admissible.
-- **C port:** 7 modules, **21 unit tests + 1 oracle self-test + 2 replay checks,
-  zero warnings** (`.\scripts\build_all.ps1`, exits 1 on failure).
+- **C port:** 7 modules, **21 unit tests + 1 oracle self-test + 2 decision replays
+  + 2 health replays, zero warnings** (`.\scripts\build_all.ps1`, exits 1 on
+  failure).
   `maze_hal.h` is **deleted** — there is no HAL and no legacy explorer. The
   brain-driven firmware **fits**: 40820/65536 flash, 6832/8192 RAM (1360 B free).
 - **Decision core (`brain.c`) — wired into the firmware, host-validated.**
@@ -1627,10 +2117,16 @@ no VLAs or C11-only constructs. **31 tests still pass.**
   the full maze it was never allowed to see.
   **But those checks use a maze-topology model, so they do not transfer to the
   robot** — see the `in.front` finding above.
-- **Bring-up instrument:** `robot codes/scripts/bt_monitor.py` (live capture +
+- **Bring-up instruments:** `robot codes/scripts/bt_monitor.py` (live capture +
   virtual-brain decision check, needs `pip install pyserial`) and
   `python scripts/parse_telemetry.py <capture.txt>` (offline measurements).
   `test/brain_oracle.c` is the virtual brain — the real `brain.c`, linked and run.
+  - **while driving:** the M1 stream (`USE_MAZE_TELEMETRY`) — what the robot
+    *decided*.
+  - **while stopped:** the **health stream** (`USE_MAZE_HEALTH`) — what the
+    hardware *reads*: keys, all 18 raw `IR_ADC[]`, `IR_mid/min/max`, the gyro.
+    `bt_monitor.py`'s health panel, or `--headless --health` (exit 1 on FAIL,
+    2 if the capture has no `H` lines). `USE_TELEMETRY=1` includes it.
 - **Firmware build:** `bash scripts/build_firmware.sh` (no Keil needed);
   RAM check: `bash scripts/measure_solver_ram.sh`.
 - **Mazes:** `simulator/mazes/*.json` (`sample_maze.json` auto-loads).
@@ -1658,6 +2154,12 @@ no VLAs or C11-only constructs. **31 tests still pass.**
   "measured at 5 of 5 junctions"; **that was circular and is retracted** (the
   fixture's masks were built from the firmware's own stop condition). See
   `robot codes/STATUS.md` §"Bring-up on the robot" item 0.
+  **A static test now exists (2026-09-23):** flash the health build, park the robot
+  on a corner **by hand**, and read the panel — the `DERIVED` block prints
+  `front = s[3..6]`, `L = S2 && front`, `R = S7 && front`, `at_node = S0 && S9`
+  straight from the raw ADC, so no drive and no `J` line are needed. A pose where
+  exactly one of `S0`/`S9` is over black also settles the gate's AND-vs-OR
+  question.
 - **STM32 on-target integration**: the build/link step is DONE (ARMCC 5, from the
   command line), `brain_step()` is wired into `main.c`'s junction handler, the
   legacy path/map arrays are retired, and the RAM blocker is gone (1360 B free,

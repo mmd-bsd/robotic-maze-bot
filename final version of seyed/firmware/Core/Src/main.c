@@ -87,7 +87,7 @@ int nav =0 ; //////0 = north     1 = west    2=south    3 = east
 
 /////////	Analog
 uint16_t							adcv[4],IR_ReadCounter=0,IR_ADC[18],IR_Logic[18],IR_max[18],IR_min[18],
-                      IR_mid[18]={1400,1200,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400};
+                      IR_mid[18]={1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400,1400};
 											
 											
 _Bool s[18] , s_current[18] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
@@ -733,11 +733,16 @@ signed int ab(signed int num)
 	return num;
 	
 }
-#ifdef USE_MAZE_TELEMETRY
+#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
 /* ======================= M1 telemetry (diagnostic build) ====================
    Compact machine-parseable lines on the Bluetooth link (USART1, 115200 baud).
    Define USE_MAZE_TELEMETRY to get them; with the macro undefined this block
    and every hook below compile away, so the normal firmware is unaffected.
+
+   SHARED WITH THE HEALTH BUILD.  USE_MAZE_HEALTH (the block below this one)
+   streams a different set of lines, but it rides this same 1 ms timebase and
+   this same BLT_TX_Buffer, so the three globals under this guard are compiled
+   for either macro and the two builds cannot disagree about what tlm_ms means.
 
    WHY THE JUNCTION LINE IS QUEUED RATHER THAN SENT
    BLT_SendData() restarts the TX DMA from scratch (Hardware.c:135), so a second
@@ -762,7 +767,9 @@ signed int ab(signed int num)
              raw and cooked can be compared on one line
    <ch>    = path_append's move char: S/L/R/B, or D when the target was reached
    ---------------------------------------------------------------------------- */
-volatile uint32_t tlm_ms = 0;
+volatile uint32_t tlm_ms = 0;              /* the stamp on every line, either build */
+
+#ifdef USE_MAZE_TELEMETRY
 volatile uint8_t  tlm_fast = 0;   /* 1 ms divider -> tlm_due every 8 ms */
 volatile _Bool    tlm_due  = 0;   /* set by the 1 ms tick, cleared by the loop */
 
@@ -783,6 +790,182 @@ static unsigned tlm_rear(void)
 	unsigned m = 0;
 	for (i = 0; i < 8; i++)  if (s[10 + i]) m |= (1u << i);
 	return m;
+}
+#endif
+
+/* A queued event is only ever RAISED by the mission hooks, but the health
+   stream has to respect it: it must not send on a tick where an event is
+   waiting, or BLT_SendData() would truncate one of the two (Hardware.c:135).
+   A health-only build queues nothing, so the test folds to a constant there
+   instead of carrying a variable that can only ever read zero. */
+#ifdef USE_MAZE_TELEMETRY
+#define TLM_EVENT_PENDING()  (tlm_has_pending)
+#else
+#define TLM_EVENT_PENDING()  (0)
+#endif
+
+#endif
+
+
+/* Which loop_start values the MISSION stream is for.  With the health build on,
+   states 7 and up are the stopped-after-a-run ones and belong to the health
+   stream instead, so the two senders never contend for the link.  Unchanged
+   behaviour when the health build is off. */
+#ifdef USE_MAZE_HEALTH
+#define TLM_DRIVING()  (loop_start != 0 && loop_start < 7)
+#else
+#define TLM_DRIVING()  (loop_start != 0)
+#endif
+
+
+#ifdef USE_MAZE_HEALTH
+/* ==================== BENCH HEALTH CHECK (diagnostic build) ================
+   What this is for: the robot could not be looked at without driving it.  The
+   mission stream above only runs while a run is in progress (TLM_DRIVING), so a
+   robot sitting on the bench -- before KEY1, or after a run -- was silent, the
+   three buttons were never reported anywhere, and the raw IR_ADC[] values were
+   not on the wire at all (the dumps that would have carried them are commented
+   out further down this file).
+
+   Define USE_MAZE_HEALTH to stream them whenever the robot is STANDING STILL:
+   in the boot loop before KEY1, and in states 7+ after a run.  Press KEY1 and
+   the boot loop exits, so the stream stops and the mission starts normally --
+   there is no mode to enter and nothing to remember.
+
+   Define HEALTH_ONLY as well for the BENCH build: the boot loop then never
+   exits, so the robot cannot start a mission at all.  The two calibrations move
+   onto the keys (KEY2 = IR, KEY3 = gyro) and KEY1 becomes an inert "send the
+   banner again" button.  Bench bring-up wants statuses, not a run.
+
+   LINE FORMAT   (times are ms since reset, from the shared 1 ms TIM14 tick)
+     H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>      20 Hz
+     T,<ms>,<what>,<v0>,...,<v17>       what = mid|min|max     ~0.35 s, cycling
+
+   <keys>  = hex bitmask, live: 1 = KEY1 (PB5), 2 = KEY2 (PC15), 4 = KEY3 (PC14)
+   <loop>  = loop_start, so the app can say which state the robot is in
+   <head>  = which bank leads (0 = the front row, which is what the bench is)
+   <gz>    = Gyro_Z  in deg/s  x 10      }
+   <za>    = Z_Angle in deg    x 10      } integers on purpose -- see below
+   <a*>    = IR_ADC[0..17], the raw sensor array, which is the ground truth
+   <v*>    = IR_mid / IR_min / IR_max, the calibration evidence
+
+   WHY THE GYRO IS SENT AS INTEGERS.  This firmware links no float printf at all
+   today; a single %.1f would pull in the float formatter for 1-2 KB of flash.
+   x10 keeps 0.1 degree resolution and costs nothing.
+
+   WHY THERE IS NO s[]/front/rear MASK HERE.  On the bench s[] is still all
+   zero: the hysteresis block that fills it lives in the superloop, and the
+   one-shot init runs only after KEY1.  A mask computed here would therefore be
+   a third derivation of the same thing rather than the firmware's own value.
+   The app derives the logical bit from a* vs mid*, and the S/J lines remain the
+   authority on what the firmware believed while it was driving.
+
+   WHY THE THRESHOLDS ARE THREE LINES AND NOT ONE.  BLT_SendData() restarts the
+   TX DMA from scratch (Hardware.c:135), so a long line is a long window in
+   which anything else would truncate it.  mid/min/max are 18 values each; sent
+   one array per line they stay about the length of an H line. */
+volatile uint8_t health_div      = 0;  /* 1 ms divider -> health_due every 50 ms */
+volatile _Bool   health_due      = 0;  /* set by the 1 ms tick, cleared here    */
+static   uint16_t health_slot    = 0;  /* send counter: picks H vs which T      */
+
+/* THE LINK HANDSHAKE.  The firmware's own `Hi ,mmdi` banner goes out once, at
+   reset -- which is BEFORE anyone has connected, so on a fresh capture it is
+   already gone.  A stream that is merely silent and a radio that is not
+   connected look identical from the app's side until that is fixed, so the app
+   sends one byte on connect, the USART1 IRQ raises this flag, and the loop
+   answers with the same banner.  "Connected" is then something the operator
+   reads, not something they infer from data arriving. */
+volatile _Bool   health_hello    = 0;  /* set by the USART1 IRQ, cleared here   */
+
+/* Until this tlm_ms the link belongs to whatever just printed a line of its
+   own.  calibr_ir() prints IR_mid when it finishes, into the same one-deep
+   BLT_TX_Buffer, and BLT_SendData() restarts the TX DMA -- so a stream line
+   sent in the same pass would silently truncate it (or be truncated).  The
+   stream stands off for a moment instead. */
+static   uint32_t health_mute_until = 0;
+
+static unsigned health_keys(void)
+{
+	unsigned k = 0;
+	if (KEY1) k |= 1;
+	if (KEY2) k |= 2;
+	if (KEY3) k |= 4;
+	return k;
+}
+
+static void health_send(void)
+{
+	int i;
+	char* p = BLT_TX_Buffer;
+
+	/* Every 7th slot carries a threshold line instead of a sensor line, so the
+	   three arrays refresh about once a second -- all a calibration value needs
+	   -- and the sensor stream keeps a steady 20 Hz. */
+	if ((health_slot % 7) == 6)
+	{
+		unsigned           which = (health_slot / 7) % 3;
+		const char*        name  = (which == 0) ? "mid"
+		                         : (which == 1) ? "min" : "max";
+		const uint16_t*    v     = (which == 0) ? IR_mid
+		                         : (which == 1) ? IR_min : IR_max;
+
+		p += sprintf(p, "T,%lu,%s", (unsigned long)tlm_ms, name);
+		for (i = 0; i < 18; i++) p += sprintf(p, ",%u", v[i]);
+		sprintf(p, "\r\n");
+	}
+	else
+	{
+		p += sprintf(p, "H,%lu,%X,%d,%d,%d,%d",
+		             (unsigned long)tlm_ms, health_keys(),
+		             loop_start, head,
+		             (int)(Gyro_Z * 10.0f), (int)(Z_Angle * 10.0f));
+		for (i = 0; i < 18; i++) p += sprintf(p, ",%u", IR_ADC[i]);
+		sprintf(p, "\r\n");
+	}
+
+	health_slot++;
+	BLT_SendData(strlen(BLT_TX_Buffer));
+}
+
+/*
+ * The boot loop's 2 ms task, and the only place the health stream is paced.
+ *
+ * Task2Ms is paced exactly the way the superloop paces it, and the reason is
+ * not cosmetic: Calculate_Z_Angle() integrates Z_Angle with a fixed step
+ * (ANGULAR_RATE_SENSITIVITY_2000DPS / 500), so it MUST be called at 500 Hz or
+ * the angle is simply wrong.  Called from a tight polling loop with no
+ * `-= 20` it would run tens of thousands of times a second and flood the gyro.
+ *
+ * This is also what makes the KEY3 "calibrate gyro" gesture in the boot loop
+ * work.  That gesture only raises GyroCalF, and the only thing that ever
+ * services GyroCalF is Calculate_Z_Angle() -- so before this call existed the
+ * buzz-and-wait did nothing at all until KEY1 was pressed, at which point the
+ * start-of-run calibration started over anyway.
+ */
+static void health_tick(void)
+{
+	if (Task2Ms > 19)
+	{
+		Task2Ms -= 20;
+		Calculate_Z_Angle();
+
+		/* The handshake outranks the stream: if the app has just asked whether
+		   anyone is there, the banner is the answer and the sample can wait
+		   one slot. */
+		if (health_hello)
+		{
+			health_hello = 0;
+			health_due   = 0;
+			BLT_SendData(sprintf(BLT_TX_Buffer, "Hi ,mmdi \r\n"));
+			return;
+		}
+
+		if (health_due && tlm_ms >= health_mute_until)
+		{
+			health_due = 0;
+			health_send();
+		}
+	}
 }
 #endif
 
@@ -1010,11 +1193,20 @@ void TIM17_IRQHandler(void)
 void USART1_IRQHandler()
 {
   char Data = USART1->RDR;
+#ifdef USE_MAZE_HEALTH
+	/* Any byte the app sends is a liveness probe -- see health_hello above.
+	   The flag is raised here and the banner is sent from the loop, because
+	   BLT_SendData() restarts the TX DMA and has no business running inside an
+	   interrupt.  Nothing else on this link talks back, so no byte is
+	   "unexpected" and none needs decoding. */
+	(void)Data;
+	health_hello = 1;
+#else
 	if(Data == '2')
 	{
 	//   loop_start= 2;
 	}
-  
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -1029,14 +1221,23 @@ void TIM14_IRQHandler(void)
 	Task100Ms++;
 	Task1000Ms++;
 	Task20Ms++;
+#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+	tlm_ms++;
+#endif
 #ifdef USE_MAZE_TELEMETRY
 	/* M1 time base.  tlm_ms is the stamp on every line.  tlm_due paces the
 	   sensor stream at 125 Hz (every 8 ms), which costs ~3.2 ms of TX per
 	   8 ms -- 40% of a 115200 link.  Deliberately NOT the 50 Hz Task20Ms
 	   cadence: the branch-detection window is only ~20 ms, so a 20 ms
 	   sample period could not resolve it at all. */
-	tlm_ms++;
 	if (++tlm_fast >= 8) { tlm_fast = 0; tlm_due = 1; }
+#endif
+#ifdef USE_MAZE_HEALTH
+	/* Health stream at 20 Hz.  Slower than the mission stream on purpose: an
+	   H line is ~118 bytes and a person is reading it, not a branch detector.
+	   Together with the T lines the pair costs ~2.7 kB/s of the 11.5 kB/s
+	   link, against the 40% the driving stream already takes. */
+	if (++health_div >= 50) { health_div = 0; health_due = 1; }
 #endif
 	
 	/////////////////////////////////////////////// Receiving Flag Control
@@ -1158,9 +1359,39 @@ int main(void)
 	
 
   IR_PWR(1);
-	
+
+#ifdef HEALTH_ONLY
+	/* ==========================================================================
+	 * BENCH MODE -- this loop NEVER exits, so the robot never starts a mission.
+	 *
+	 * That is the whole point of HEALTH_ONLY: on the bench you want statuses and
+	 * calibrations, not a run, and a stray KEY1 press should not send the robot
+	 * off down a maze with nobody watching it.  KEY1 is therefore inert here
+	 * (it re-sends the banner, so it is still a useful "are you there?" button)
+	 * and the two calibrations move onto the keys instead: KEY2 = the IR
+	 * calibration, KEY3 = the gyro one, exactly as in a mission.
+	 *
+	 * To get the mission back, rebuild without HEALTH_ONLY -- `USE_HEALTH=1`
+	 * sets it, `USE_TELEMETRY=1` does not.  Nothing else in the firmware knows
+	 * this macro exists.
+	 * ========================================================================== */
+	static volatile _Bool bench_leave = 0;
+	for (;;)
+#else
 	while(KEY1==0)
+#endif
 	{
+#ifdef HEALTH_ONLY
+		 /* The way out -- for the compiler as much as for anyone else.  A loop
+		    it can prove is infinite makes everything after it unreachable, and
+		    ARMCC says so (warning #128-D at the mission init below).  volatile
+		    means it cannot prove that, so the code below the loop stays live
+		    and the zero-warning rule holds without a pragma suppressing a
+		    diagnostic that might one day be real.  Nothing in the firmware
+		    sets this flag: reach it from a debugger, or just rebuild without
+		    HEALTH_ONLY. */
+		 if (bench_leave) break;
+#endif
 		 if(KEY3)
 		 {
 					BUZZER(1);
@@ -1172,8 +1403,35 @@ int main(void)
 					HAL_Delay(50);
 					BUZZER(0);
 		 }
-		 Read_IRSensors();   
-			 
+		 Read_IRSensors();
+
+#ifdef USE_MAZE_HEALTH
+		 /* The bench health stream.  This loop IS the "robot is idle" state --
+			 it runs from power-up until KEY1 -- so the diagnostics run here and
+			 nowhere else before a mission.  Leaving the loop on the KEY1 press
+			 stops the stream by itself. */
+#ifdef HEALTH_ONLY
+		 /* KEY1 is inert in bench mode, but not silent: it asks the firmware to
+			 re-send the banner, which is the same handshake the app uses on
+			 connect.  A button that proves the radio from the robot's side. */
+		 if (KEY1) health_hello = 1;
+
+		 /* THE IR CALIBRATION, ON THE BENCH.  This is the same routine the
+			 superloop runs on KEY2, driven from the same flag -- calibr_ir() is
+			 a state machine that returns immediately each pass (~100 passes of
+			 settling, then 185 of spinning with MotorB(40,-40) while it tracks
+			 IR_max/IR_min), so it must be DRIVEN from the loop, not called as a
+			 blocking routine.  It prints its own IR_mid line when it finishes,
+			 hence the mute. */
+		 if (calibrat_now)
+		 {
+			 calibr_ir();
+			 if (!calibrat_now) health_mute_until = tlm_ms + 40;
+		 }
+		 else if (KEY2) calibrat_now = 1;
+#endif
+		 health_tick();
+#endif
 	}
 
 	    
@@ -1199,6 +1457,24 @@ int main(void)
 		
 		IR_PWR(1);
 
+#ifdef USE_MAZE_HEALTH
+		/* Bench health stream, for the states where the robot is standing STILL
+		   -- 0 before a run, 7+ after one.  The 2 ms task below already calls
+		   Calculate_Z_Angle() at the right rate, so unlike the boot loop this
+		   needs only the send.
+
+		   Placed BEFORE the mission slot, and gated on !tlm_has_pending, so a
+		   queued J/Z event always wins the link.  The mission stream's own gate
+		   is TLM_DRIVING(), which is false in exactly these states, so the two
+		   senders can never both call BLT_SendData() in one pass -- which would
+		   truncate whichever went first (Hardware.c:135). */
+		if (health_due && !TLM_EVENT_PENDING() && !TLM_DRIVING())
+		{
+			health_due = 0;
+			health_send();
+		}
+#endif
+
 #ifdef USE_MAZE_TELEMETRY
 		/* M1: exactly one TX slot per 8 ms tick -- a queued event if one is
 		   waiting, otherwise a sensor sample. Never both, because a second
@@ -1216,7 +1492,7 @@ int main(void)
 				sprintf(BLT_TX_Buffer, "%s", tlm_pending);
 				BLT_SendData(strlen(BLT_TX_Buffer));
 			}
-			else if (loop_start != 0)
+			else if (TLM_DRIVING())
 			{
 				sprintf(BLT_TX_Buffer, "S,%lu,%03X,%02X,%d,%d,%d,%d,%d\r\n",
 				        (unsigned long)tlm_ms, tlm_front(), tlm_rear(),

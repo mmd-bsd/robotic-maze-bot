@@ -60,7 +60,7 @@ Example output:
 ```
 
 This builds 5 targets and runs them all: **21 unit tests + 1 oracle self-test +
-2 replay checks**, and **it exits 1 if anything failed.**
+2 decision replays + 2 health replays**, and **it exits 1 if anything failed.**
 
 - `test_graph.exe` (6 tests) -- nodes, edges, Dijkstra
 - `test_robot.exe` (7 tests) -- heading, commands, frontiers
@@ -107,8 +107,22 @@ python scripts/bt_monitor.py --record           # also write build/bt_captures/
 | `--port COM7 --baud 115200` | skip the port picker |
 | `--replay <capture.txt>` | run the identical pipeline from a file, no serial |
 | `--headless` | no tkinter; prints a verdict; **exit 1 on any mismatch** |
+| `--health` | the bench health view/report instead of the mission check |
 | `--demo` | synthetic data into the GUI, no hardware |
 | `--no-oracle` | plot only, skip the decision check |
+
+The **TERMINAL** strip along the bottom of the window is an *event log*, not a raw
+dump: the banner, every unparsed line, key edges, threshold changes, plan dumps and
+link open/close/errors. The 20 Hz `H`/`S` stream deliberately does not appear there
+— at that rate it would push the banner off the top within a second, and the banner
+is the line the pane exists for. The stream is drawn in the bar/panel above instead.
+**Ping robot** re-sends the probe; the app also sends it automatically on connect.
+
+With a `USE_TELEMETRY=1` build the view follows the data: `H`/`T` lines put the
+app on the **health panel**, `S`/`J` lines put it back on the mission map, and a
+toolbar button overrides either way. The live health panel is documented in
+[Health check — `USE_HEALTH=1`](#health-check--use_health1) below, together with
+the bench procedure and the `H`/`T` field tables.
 
 **Dependency:** `pip install pyserial`, needed for the serial path **only** — the
 import is guarded with a clear message, and `--replay` / `--demo` work without it.
@@ -137,6 +151,12 @@ build/brain_oracle.exe --probe     # the moves, unchecked
 `capture_disagree.txt` is `capture_agree.txt` with **exactly one field changed**
 (junction 3's `ch` → `B`), and the suite asserts exactly one mismatch at that
 junction — a checker that only ever passes proves nothing.
+
+The two **health** fixtures, `capture_health_ok.txt` and
+`capture_health_fault.txt`, are generated the same way but are **synthetic
+throughout** — `python scripts/make_health_fixtures.py` writes both from one
+schedule with only the planted faults varying, so a diff between them is a diff
+between the faults. They test the tools; they cannot test a sensor.
 
 ---
 
@@ -300,6 +320,164 @@ there being a forward path.
 
 ---
 
+## Health check — `USE_HEALTH=1`
+
+The **bench** instrument. M1 telemetry only streams while a mission is running
+(`loop_start != 0`), so a robot standing still — before KEY1, or parked after a
+run — is silent. That is exactly the state in which you want to look at the
+hardware, and it is the state the health build answers for:
+
+```bash
+USE_HEALTH=1 bash scripts/build_firmware.sh       # BENCH ONLY -- no mission
+USE_TELEMETRY=1 bash scripts/build_firmware.sh    # both -- the one to flash to run
+```
+
+**The two differ by one macro.** `USE_HEALTH=1` also defines `HEALTH_ONLY`: the
+pre-KEY1 boot loop never exits, so the robot **cannot** start a mission whatever
+is pressed. That is the bench build — sit the robot down in diagnostics and leave
+it there. `USE_TELEMETRY=1` adds the health stream *without* `HEALTH_ONLY`, because
+that is the bring-up build and it has to be able to drive.
+
+`USE_TELEMETRY=1` implies the health stream as well, so a single flash covers both
+jobs. The two never contend for the link: the health send is gated on the robot
+being **stopped** (`loop_start == 0 || loop_start >= 7`) and on
+`TLM_EVENT_PENDING()` being false, so a queued junction line always wins its slot.
+`TLM_DRIVING()` is the one predicate that separates them.
+
+In Keil the defines go in **Options for Target → C/C++ → Define**, which already
+reads `USE_HAL_DRIVER,STM32G031xx`. Add `USE_MAZE_HEALTH,HEALTH_ONLY` for the bench
+build, or `USE_MAZE_TELEMETRY,USE_MAZE_HEALTH` to be able to run. (The **Asm** tab's
+`Define` box is a different, empty box — that one is not it.)
+
+```bash
+python scripts/bt_monitor.py                 # the health panel is automatic
+python scripts/parse_telemetry.py capture.txt   # or the offline report
+```
+
+### What it adds
+
+Two line types, sent only while stopped:
+
+```
+H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>        20 Hz
+T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max         ~0.35 s, cycling
+```
+
+| Field | Meaning |
+|---|---|
+| `<keys>` | hex bitmask, live: **1=KEY1** (PB5), **2=KEY2** (PC15), **4=KEY3** (PC14) |
+| `<loop>` | `loop_start`, so the app knows which state the robot is in. Named by `parse_telemetry.LOOP_STATES` (0 = BOOT/BENCH, 1 = EXPLORE, … 8 = DONE) and shown on the health panel's STATE card. **In the bench build this is 0 and stays 0** — anything else means the mission started, i.e. `HEALTH_ONLY` did not take |
+| `<head>` | which bank leads; 0 = the front row, which is the one on the bench |
+| `<gz>` | `Gyro_Z` in **deg/s ×10**, as an integer |
+| `<za>` | `Z_Angle` in **deg ×10**, as an integer |
+| `a0..a17` | raw `IR_ADC[]` — the ground truth, unfiltered and unconverted |
+
+`H` is **25 fields** (tag + 6 scalars + 18 channels) and `T` is **21** (tag + ms +
+`what` + 18). Both counts are asserted by `parse_telemetry.py`; a mismatch is
+reported as a BAD line rather than guessed at.
+
+`<gz>`/`<za>` are integers because the firmware links **no float printf at all**
+— one `%.1f` would pull in the float formatter for 1-2 KB of the 64 KB flash. ×10
+buys 0.1° resolution for free, and the parser divides by 10 once, at parse time,
+so no consumer has to remember to.
+
+`T` carries `IR_mid[]`, `IR_min[]` and `IR_max[]` — the calibration evidence —
+cycling one of the three per slot. It is three ~106-byte lines rather than one
+290-byte line because `BLT_SendData()` restarts the TX DMA: a long line is a long
+window in which a junction event would truncate it.
+
+**Deliberately not sent: the `s[]` mask.** On the bench `s[]` is still all-zero —
+the hysteresis block that fills it lives in the superloop and the one-shot init
+runs only after KEY1 — so a mask here would be a fresh third derivation rather
+than the firmware's own value. The app derives the logical bit from `adc[i]` vs
+`mid[i]` itself and labels it as derived; the `S`/`J` lines stay the authority on
+what the *firmware* believed.
+
+| Build | Flash | RAM |
+|---|---|---|
+| plain | 40820 / 65536 | 6832 / 8192 (1360 free) |
+| `USE_HEALTH=1` (bench: `+HEALTH_ONLY`) | 41560 / 65536 | 6848 / 8192 (1344 free) |
+| `USE_TELEMETRY=1` (health included, can run) | 42264 / 65536 | 6912 / 8192 (1280 free) |
+
+### The bench procedure
+
+1. Flash the **bench** build (`USE_HEALTH=1`, i.e. `USE_MAZE_HEALTH` +
+   `HEALTH_ONLY`), or the `USE_TELEMETRY=1` build if you also want to run. Power on
+   without pressing KEY1. The robot sits in the boot loop and streams `H`/`T`.
+2. Connect `bt_monitor.py`. Two things should happen together: the view switches to
+   the health panel by itself, and **`Hi ,mmdi` appears in the TERMINAL** — the app
+   sends a probe byte the moment it connects and the robot answers with its banner.
+   The banner is the only line on the wire that can be a *reply*, so it is the only
+   proof the radio works in both directions. If it does not arrive, press **Ping
+   robot**; if it still does not, the port or the pairing is wrong and the silent
+   bar means nothing either way.
+3. **`loop_start`** — the STATE card at the top of the health panel reads it and
+   names it. On the bench it is `0  BOOT / BENCH` and stays there. **That is the
+   check that `HEALTH_ONLY` took**: anything other than 0 means the mission started.
+4. **Keys** — press each of KEY1/KEY2/KEY3. Each indicator lights on press and
+   the edge log records the down time and how long it was held. A button that
+   never lights is open; one that lights and stays lit past `KEY_STUCK_MS` is
+   shorted, and the log is what distinguishes a stuck button from a bounce. In the
+   bench build the two calibrations live on the keys: **KEY2 = the IR calibration**
+   (it prints its own 18-value `IR_mid` dump, which lands in the TERMINAL) and
+   **KEY3 = the gyro one**. KEY1 only re-sends the banner here.
+5. **Sensors** — slide a card or a finger under the bar. Every pad it passes
+   should track high→low→high with the raw ADC printed in the cell. A pad pinned
+   at `0` or `4095` for the whole capture is called out as a FAIL: a pad stuck
+   **low** reads BLACK (a lane the brain can see and the robot cannot drive
+   down), one stuck at the rail reads WHITE forever (a missing branch detector).
+6. **Coordinates** — `GYRO` reads `Gyro_Z` as a rate. A robot standing still
+   should read ≈0 deg/s; a large offset is a bias, not motion, and **KEY3** is
+   the gesture that calibrates it. Before KEY1, `Z_Angle` is always uncalibrated.
+7. **The layout on screen** — it is the **board**, not a sensor bar, and it is drawn
+   long and narrow like the board itself. `S0` and `S9` straddle the dashed centre
+   line (`S0`/`S9` sit on the rotation axis at the robot's centre), `S1` is set back
+   under `S2`, `S8` under `S7`, and the rear bank runs `S17..S10` left to right.
+   Each pad carries its own name and ADC; that is all the drawing says — the
+   derived summary and the caveats are on the cards beside it. Park the robot on a
+   known corner and read the DERIVED card against the map — that is the check the
+   app cannot make for you (`SENSORS.md` §3, which lists the three bench questions
+   this settles).
+8. **The cards scroll** — the column is taller than the window, so the wheel over
+   any card scrolls the panel (CHECKS, the verdict, is at the bottom). The
+   **THRESHOLDS** table has its own scrollbar: all 18 pads are in it, 10 rows at a
+   time, and the wheel over it scrolls the table rather than the panel.
+9. Either stop here (bench build), or — if you flashed the `USE_TELEMETRY=1` build —
+   press **KEY1**: the stream stops, the mission starts, and the tools switch back
+   to the mission view on the first `S`/`J` line.
+
+> **The one thing this fixes on the way past.** The `KEY3` "calibrate gyro"
+> gesture in the boot loop was **dead** before this change: it only set
+> `GyroCalF`, and the only thing that services that flag is `Calculate_Z_Angle()`,
+> which ran solely from the superloop. So the buzz-and-hold did nothing until
+> KEY1 — at which point the boot sequence started a fresh calibration anyway.
+> `health_tick()` runs `Calculate_Z_Angle()` in the boot loop, so KEY3 now works
+> where it is offered. Scoped to the health build, so normal-boot behaviour is
+> untouched.
+
+### Headless
+
+```bash
+python scripts/bt_monitor.py --replay capture.txt --headless --health
+```
+
+Feeds the capture to the same `HealthModel` and prints the **identical health
+section** the offline tool does — both go through `pt.health_report()`, so they
+cannot drift; only the wrapper differs (`parse_telemetry.py` adds its mission
+summary counts above, `bt_monitor.py` adds its exit line below). It exits **1** on
+any FAIL, **2** if the capture contains no `H` lines at all — a distinct code so
+"nothing to check" can never read as a pass. `build_all.ps1` asserts both
+directions against the two synthetic fixtures: `capture_health_ok.txt` → 0,
+`capture_health_fault.txt` → 1.
+
+> Those two fixtures are **parser and UI tests with invented values**
+> (`scripts/make_health_fixtures.py` builds them from a toy model of the bar).
+> They say the tools agree on the wire format and reach the right verdict. They
+> say **nothing** about any physical sensor — that is the whole point of the
+> bench check, and a synthesised file cannot answer it.
+
+---
+
 ## File layout
 
 ```
@@ -312,7 +490,8 @@ robot codes/
 │   ├── measure_solver_ram.sh      Measure the 8 KB RAM budget, per object
 │   ├── field_to_maze.py           Real field image → maze .json + overlay check
 │   ├── parse_telemetry.py         M1 capture → counts/cell, sensors, decisions
-│   └── bt_monitor.py              LIVE Bluetooth capture + virtual-brain check
+│   ├── bt_monitor.py              LIVE Bluetooth capture + virtual-brain check
+│   └── make_health_fixtures.py    Regenerate the two synthetic health captures
 ├── inc/                         # Headers (9 files)
 │   ├── maze_types.h               Structs, enums, MazeCommand
 │   ├── maze_config.h              Memory limits, motion params
@@ -506,10 +685,12 @@ is the single command executor for both stages.
 | `python scripts/run_brain.py <file.json>` | Test the decision core against a simulated robot |
 | `.\scripts\build_all.ps1` | Rebuild + run all unit tests |
 | `bash scripts/build_firmware.sh` | Build + link the STM32 firmware → `seyed.hex` |
-| `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | **The supervised bring-up build:** +telemetry, +5 s pause per junction |
+| `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | **The supervised bring-up build:** +telemetry, +health stream, +5 s pause per junction |
+| `USE_HEALTH=1 bash scripts/build_firmware.sh` | **Bench only:** health stream, `HEALTH_ONLY` — the robot cannot start a mission. KEY2 = IR cal, KEY3 = gyro cal, KEY1 = re-send the banner |
 | `python scripts/parse_telemetry.py capture.txt` | Turn a capture into measurements + brain decisions |
 | `python scripts/bt_monitor.py` | **LIVE capture + virtual-brain decision check (GUI)** |
 | `python scripts/bt_monitor.py --replay <cap> --headless` | Re-run a capture with no robot; exit 1 on mismatch |
+| `python scripts/bt_monitor.py --replay <cap> --headless --health` | Health verdict, no robot; exit 1 on FAIL, 2 if no `H` lines |
 | `./build/brain_oracle.exe --selftest` | The virtual brain's own 5-step self-test |
 | `bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget (per object, exits 1 on overflow) |
 | `python scripts/field_to_maze.py <field.png>` | Real field image → maze `.json` |

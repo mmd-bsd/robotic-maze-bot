@@ -61,9 +61,11 @@ SEYED/
 │   │   ├── inc/                      headers (types, config, modules, brain)
 │   │   ├── src/                      implementations (graph, robot, FSM, brain, …)
 │   │   ├── test/                     unit + integration tests (21) + brain_oracle
-│   │   │   └── fixtures/             bt_monitor replay captures (agree/disagree)
+│   │   │   └── fixtures/             bt_monitor replay captures (agree/disagree,
+│   │   │                             health ok/fault — synthetic, see below)
 │   │   ├── scripts/                  build_all.ps1, run_maze.py, run_brain.py,
-│   │   │                             parse_telemetry.py, bt_monitor.py, …
+│   │   │                             parse_telemetry.py, bt_monitor.py,
+│   │   │                             make_health_fixtures.py, …
 │   │   └── STATUS.md                 module status, build commands, design notes
 │   ├── firmware/                     STM32G031 firmware (the robot)
 │   │   ├── Core/Src/main.c           superloop, motion, and the brain seam
@@ -186,6 +188,37 @@ code between them.
 python "final version of seyed/simulator/maze generator/maze_generator.py"
 python "final version of seyed/simulator/maze solver/maze_solver.py"
 ```
+
+**C library + firmware** (from `robot codes/`): GCC 14.2 (MSYS2 MinGW) and Keil's
+**ARM Compiler 5** — see `robot codes/BUILD_GUIDE.md`.
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build_all.ps1
+bash scripts/build_firmware.sh
+```
+
+**Two compile-time diagnostics, never both in one state.** They are mutually
+exclusive by *when* they run, not by macro: the mission stream (`S`/`J`/`Z`/`B`)
+only fires while driving, the health stream (`H`/`T`) only while stopped, and one
+predicate — `TLM_DRIVING()` — is what separates them.
+
+| Flag | Build | Streams |
+|---|---|---|
+| *(none)* | normal | nothing; the build that races |
+| `USE_MAZE_HEALTH` | `USE_HEALTH=1` | `H`/`T` while stopped — keys, 18 IR, gyro |
+| `USE_MAZE_HEALTH` + `HEALTH_ONLY` | `USE_HEALTH=1` | the same, and the robot **cannot start a mission** — the pre-KEY1 loop never exits, so `loop_start` stays 0 for the whole session. This is the bench build; KEY2 = IR calibration, KEY3 = gyro, KEY1 = re-send the banner |
+| `USE_MAZE_TELEMETRY` (+ health) | `USE_TELEMETRY=1` | `S`/`J`/`Z`/`B` while driving **and** the health stream while stopped, plus the 5 s per-junction pause (the supervised bring-up build — and this one must be able to run, so it never defines `HEALTH_ONLY`) |
+
+Both streams are read by the same two tools, which go through one parser
+(`scripts/parse_telemetry.py`) so they cannot drift: `bt_monitor.py` for live
+capture and a virtual-brain decision check, `parse_telemetry.py` for the offline
+report. `bt_monitor.py --health` switches the same pipeline to the bench verdict.
+
+The robot also **announces itself**: the `Hi ,mmdi` banner goes out on reset, and
+under `USE_MAZE_HEALTH` the USART RX interrupt makes any received byte produce the
+same banner, so the monitor app can prove the radio works in *both* directions
+rather than inferring it from a stream that has not started yet. That banner is the
+only line on the wire that can be a reply.
 
 ---
 
@@ -336,3 +369,10 @@ These are hard-won; keep them in mind before changing the simulator.
   the RAM — see `robot codes/STATUS.md`.  Remaining: on-target bring-up and
   encoder calibration.  The `New Start/` tree holds earlier C prototypes
   (read-only reference).
+  For bring-up there are now two instruments: the **M1 telemetry** stream for
+  what the robot *decided* while driving, and the **health build**
+  (`USE_MAZE_HEALTH`) for what the hardware *reads* while stopped.  The health
+  view is the static test for the open `in.front` corner defect (rule 9 below):
+  park the robot on a corner by hand and read the centre group and the gate off
+  the screen, with no drive and no `J` line needed.  Neither can validate the
+  brain's *model* of the robot — only the robot can, which is why both exist.

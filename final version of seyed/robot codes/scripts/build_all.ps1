@@ -127,14 +127,25 @@ if (Test-Path $exe) {
 # ---- bt_monitor.py replay checks ----
 # THE DETECTOR DETECTS.  A checker that only ever passes proves nothing (the
 # vacuously-passing RAM check in CHANGELOG.md is this repo's own precedent), so
-# both directions are asserted: the agreeing fixture must produce ZERO
-# mismatches, the disagreeing one must produce EXACTLY ONE, and exit 1.
+# every direction is asserted: the agreeing fixture must produce ZERO
+# mismatches, the disagreeing one EXACTLY ONE, the healthy health capture no
+# FAIL, and the planted-fault one a FAIL -- all with exit 1 on failure.
+#
+# The two health fixtures are SYNTHETIC (scripts/make_health_fixtures.py) and
+# test the TOOLS, not the robot.  They cannot say anything about hardware,
+# which is what the bench check itself is for.
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Host "[SKIP] bt_monitor replay (python not on PATH)" -ForegroundColor DarkYellow
 } else {
     $replays = @(
-        @{ File = "capture_agree.txt";    Want = 0; What = "0 decision mismatches" },
-        @{ File = "capture_disagree.txt"; Want = 1; What = "exactly 1 decision mismatch" }
+        @{ File = "capture_agree.txt";        Want = 0; Args = @()
+           What = "0 decision mismatches" },
+        @{ File = "capture_disagree.txt";     Want = 1; Args = @()
+           What = "exactly 1 decision mismatch" },
+        @{ File = "capture_health_ok.txt";    Want = 0; Args = @("--health")
+           What = "0 health FAIL" },
+        @{ File = "capture_health_fault.txt"; Want = 1; Args = @("--health")
+           What = "1 health FAIL (S7 pinned, thresholds uncalibrated)" }
     )
     foreach ($r in $replays) {
         $fix = "$TEST/fixtures/$($r.File)"
@@ -142,8 +153,9 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
             Write-Host "[SKIP] bt_monitor $($r.File) (fixture missing)" -ForegroundColor DarkYellow
             continue
         }
-        Write-Host "[RUN] bt_monitor --replay $($r.File)" -ForegroundColor Yellow
-        $out = & python "scripts/bt_monitor.py" --replay $fix --headless 2>&1 | Out-String
+        Write-Host "[RUN] bt_monitor --replay $($r.File) $($r.Args -join ' ')" -ForegroundColor Yellow
+        $argv = @("scripts/bt_monitor.py", "--replay", $fix, "--headless") + $r.Args
+        $out = & python @argv 2>&1 | Out-String
         $code = $LASTEXITCODE
         Write-Host $out.TrimEnd()
         if ($code -ne $r.Want) {
@@ -159,7 +171,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 Write-Host "==============================================" -ForegroundColor Cyan
 if ($failed -eq 0) {
     Write-Host "  DONE -- all builds and runs passed" -ForegroundColor Green
-    Write-Host "  (21 unit tests + 1 oracle selftest + 2 replay checks)" -ForegroundColor Green
+    Write-Host "  (21 unit tests + 1 oracle selftest + 2 decision replays + 2 health replays)" -ForegroundColor Green
 } else {
     Write-Host "  FAILED: $failed build(s)/run(s)" -ForegroundColor Red
 }
