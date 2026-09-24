@@ -5,7 +5,7 @@ WHAT THESE ARE
   test/fixtures/capture_health_ok.txt      a healthy bench session   -> exit 0
   test/fixtures/capture_health_fault.txt   the same, two faults      -> exit 1
 
-Both are PARSER AND UI TESTS WITH INVENTED VALUES.  Every ADC count in them
+Both are PARSER AND UI TESTS WITH INVENTED VALUES.  Every pad reading in them
 comes from the toy model in this file, not from a robot.  Passing them says the
 tools agree on the wire format and reach the verdict they should; it says
 NOTHING about any physical sensor.  This is the same honesty rule
@@ -13,13 +13,21 @@ capture_agree.txt carries -- a fixture cannot test the question it was
 constructed to assume -- and it applies with more force here, because "are the
 sensors healthy" is exactly the question a synthesised file cannot answer.
 
+WHAT THE WIRE CARRIES, since it decides what can be planted here: the H line
+carries one 0/1 per pad, already decided by the firmware, and the T line carries
+IR_mid ONCE (at calibration).  So the toy model below still computes an ADC per
+pad -- something has to decide the bit -- and then applies the firmware's own
+comparison to it, and only the resulting bit goes on the wire.  The faults that
+can be planted are therefore the ones that survive that collapse: a pad that
+never moves, not a pad that reads oddly.
+
 WHY GENERATED RATHER THAN HAND-WRITTEN
 So the deliberate fault is reviewable in one place (the SPECS table below) and
 the files can be regenerated when the wire format changes, instead of being
 hand-edited into a state nobody can justify.
 
-THE FAULTS ARE THE ONLY DIFFERENCE between the two files: one emit() writes
-both, from the same schedule, with `pinned_rail` and `thresholds` varying.  A
+THE FAULTS ARE THE ONLY DIFFERENCE between the two files: one build() writes
+both, from the same schedule, with `stuck_black` and `thresholds` varying.  A
 diff between the fixtures is therefore a diff between the faults, and nothing
 else -- which is what makes the pair a real two-sided test rather than two
 unrelated files.
@@ -41,15 +49,15 @@ FIXTURE_DIR = os.path.normpath(os.path.join(HERE, os.pardir, "test", "fixtures")
 # The model of the sensor bar
 # ==========================================================================
 #
-# POLARITY, and everything below depends on it: the firmware sets s[i]=1
-# ("black") when IR_ADC[i] <= IR_mid[i]-50, and s[i]=0 ("white") when
-# IR_ADC[i] >= IR_mid[i]+50 (main.c:1960-1967).  So a pad reads HIGH over the
-# reflective field and LOW over the line -- and therefore in the calibration
-# IR_max is the WHITE end and IR_min the BLACK end, the opposite way round from
-# how those names read.
+# POLARITY, and everything below depends on it: "black" is 1 and comes from a
+# LOW reading, because the line absorbs and the field reflects.  The bit on the
+# wire is decided at send time by the firmware's health_send(): 1 when
+# IR_ADC[i] <= IR_mid[i]-500.  (That 500 is the health line's own margin, not
+# the +/-50 the driving path latches s[] with -- see main.c for both.)
 WHITE = 3180          # a pad over the reflective field (high)
 BLACK = 165           # a pad over the line or the target disc (low)
 JITTER = 12           # sample-to-sample wobble, so `changes` is not trivially 0
+STUCK_LOW = 20        # what a shorted pad reads: under every threshold there is
 
 # The schedule the two captures share: a card slid under the bar from the left
 # half to the right half, so the centre group, both branch detectors and the
@@ -69,12 +77,21 @@ KEYS = ((600, 1000, 1), (850, 1050, 2), (1500, 1750, 4))
 
 PERIOD_MS = 50        # 20 Hz, the rate the firmware paces the H line at
 END_MS = 2000
-T_EVERY = 7           # every 7th slot is a T line, as health_send() does
 
-# main.c:90, literally: the power-on defaults.  A robot that has never been
-# calibrated holds THESE in IR_mid[], with IR_min/IR_max still zero.
+# main.c:90, literally: the power-on defaults, which is what IR_mid[] holds
+# before calibr_ir() has ever run.  Emitted by no fixture -- an uncalibrated
+# robot sends no T line at all now, and "still at the default" is what the
+# report says when it sees these numbers.  Kept here so the fault file's story
+# ("no calibration ran") can be read against the values it would have had.
 POWER_ON_MID = (1400, 1200, 1400, 1400, 1400, 1400, 1400, 1400, 1400,
                 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400, 1400)
+
+# When the healthy file's calibration lands.  KEY**2** is the IR calibration key
+# -- in the bench loop and in a run alike (main.c:1463 and :1562 set
+# `calibrat_now`; KEY3 is the GYRO calibration) -- and it goes down at 850 in
+# KEYS.  calibr_ir() sends its single T line when it finishes, so one line
+# appears here and nowhere else in the file.
+CAL_MS = 900
 
 # ==========================================================================
 # The two captures
@@ -85,13 +102,14 @@ SPECS = (
         "what": "a healthy bench session, captured AFTER a run",
         "verdict": "expects exit 0 -- no FAIL",
         "loop": 7,               # 7 = stopped after the fast run, so the
-        "pinned_rail": (),       #   calibration below is one that really ran
+        "stuck_black": (),       #   calibration below is one that really ran
         "thresholds": "calibrated",
         "gz_tenths": (3, 7),     # a resting gyro: 0.3 - 0.7 deg/s
         "notes": (
             "Keys cycle (KEY1 and KEY2 overlap, to exercise the bitmask), the",
             "card slides from the left half of the inner row to the right half,",
-            "and every pad was calibrated against both surfaces.",
+            "and every pad was calibrated against both surfaces -- so the file",
+            "holds ONE T line, at the moment KEY2's IR calibration finished.",
         ),
     },
     {
@@ -99,20 +117,23 @@ SPECS = (
         "what": "the SAME session with two faults planted",
         "verdict": "expects exit 1 -- FAIL, naming S7 and the missing calibration",
         "loop": 0,               # 0 = the boot loop, before KEY1 -- which is
-        "pinned_rail": (7,),     #   exactly when nothing is calibrated yet
+        "stuck_black": (7,),     #   exactly when nothing is calibrated yet
         "thresholds": "uncalibrated",
         "gz_tenths": (120, 142),  # an uncalibrated gyro: ~12-14 deg/s of bias
         "notes": (
-            "FAULT 1 -- S7 (the right branch detector) is held at the 4095 rail",
-            "for the whole capture: it never moves, so it is saturated or dead,",
-            "and it would read WHITE whatever it is over.  That is the branch",
-            "detector the graph needs to see a right-hand lane, so it is a",
-            "missing-edge fault, not a cosmetic one.",
+            "FAULT 1 -- S7 (the right branch detector) reads BLACK for the whole",
+            "capture: its reading is stuck low, as a shorted phototransistor or a",
+            "pad physically covered would be.  That is the dangerous direction --",
+            "the brain sees a right-hand lane that is not there -- and it is the",
+            "one fault the bit wire can still prove, because the pad does not",
+            "move while its neighbours do.",
             "",
-            "FAULT 2 -- IR_min/IR_max are still zero, i.e. no calibration has",
-            "run, so IR_mid is the power-on default from main.c:90 rather than",
-            "anything this robot measured.  Every black/white call in the file",
-            "is therefore against a guessed threshold.",
+            "FAULT 2 -- no T line at all, i.e. no calibration has run, so the",
+            "bits in this file were decided against the power-on defaults from",
+            "main.c:90 rather than anything this robot measured.  Note that this",
+            "is now a WARN about provenance and not about numbers: with only the",
+            "bits on the wire, a wrong mid and a right one look identical when",
+            "the pad is clearly over one surface or the other.",
             "",
             "The gyro bias (~13 deg/s standing still) is a CONSEQUENCE of the",
             "same power-on state, not a third planted fault: it is what an",
@@ -158,14 +179,24 @@ def calibrated_ends():
     return [(140 + 3 * i, 3120 + 7 * i) for i in range(18)]
 
 
+def bits_from(adc, mid):
+    """The firmware's own decision, one line of main.c's health_send().
+
+    This is the step that matters for what a fixture can test: the toy model
+    has to reach the same 0/1 the robot would, because the 0/1 is all that
+    leaves the board.  `(int)` casts on both sides, as the C does -- IR_mid[i]
+    is a uint16_t, and the subtraction must not wrap.
+    """
+    return [1 if adc[i] <= mid[i] - 500 else 0 for i in range(18)]
+
+
 def build(spec):
     """-> the file as a list of lines."""
     rng = LCG(0x5E7ED)                    # fixed: same bytes every run
     cal = calibrated_ends()
-    if spec["thresholds"] == "calibrated":
+    calibrated = spec["thresholds"] == "calibrated"
+    if calibrated:
         mid = [((b + w) // 2) for b, w in cal]          # (IR_max+IR_min)/2
-        lo = [b for b, _w in cal]                       # IR_min = the BLACK end
-        hi = [w for _b, w in cal]                       # IR_max = the WHITE end
         # A pad sits just inside the range its calibration found, not exactly
         # on the ends: the ends are the extremes of a spin, not the resting
         # reading, and a fixture that put them on the end would hide an
@@ -174,8 +205,6 @@ def build(spec):
         base_w = [w - 40 for _b, w in cal]
     else:
         mid = list(POWER_ON_MID)                        # never calibrated
-        lo = [0] * 18
-        hi = [0] * 18
         base_b = [BLACK + 5 * (i % 3) for i in range(18)]
         base_w = [WHITE + 6 * (i % 5) for i in range(18)]
 
@@ -188,31 +217,38 @@ def build(spec):
     times = list(range(0, END_MS + 1, PERIOD_MS))
 
     out = []
-    slot = 0
     for k, ms in enumerate(times):
         keys = keys_at.get(ms, 0)
-        # KEY3 is the one that starts a calibration, so the gyro settles after
-        # it in the healthy file.  Belt and braces: it also makes the fixture
-        # wire-consistent with the warning the model raises.
+        # KEY3 is the GYRO calibration (KEY2 is the IR one), so the gyro settles
+        # after it in the healthy file.  Belt and braces: it also makes the
+        # fixture wire-consistent with the warning the model raises.
         gz = gz0 + (gz1 - gz0) * k // max(1, len(times) - 1)
         za = (gz0 * ms) // 1000
         adc = []
         for i in range(18):
-            if i in spec["pinned_rail"]:
-                adc.append(4095)                        # FAULT: never jitters
+            if i in spec["stuck_black"]:
+                adc.append(STUCK_LOW)                   # FAULT: never jitters
                 continue
             v = base_b[i] if over_black(i, ms) else base_w[i]
             adc.append(max(0, min(4095, v + rng.span(JITTER))))
+        # Before the calibration the firmware is still deciding with the
+        # power-on defaults -- the H line does not wait for KEY2 -- so the bits
+        # before CAL_MS are computed against those, not against the values the
+        # T line will report a moment later.  The captures sit far enough from
+        # both thresholds that no bit actually flips at the change; the point is
+        # that the model does not pretend the robot knew its own calibration
+        # before it had run one.
+        m_now = list(POWER_ON_MID) if (calibrated and ms < CAL_MS) else mid
         out.append("H,%d,%X,%d,%d,%d,%d,%s"
                    % (ms, keys, spec["loop"], 0, gz, za,
-                      ",".join(str(v) for v in adc)))
+                      ",".join(str(b) for b in bits_from(adc, m_now))))
 
-        if k % T_EVERY == T_EVERY - 1:
-            which = (slot // T_EVERY) % 3
-            name, vals = (("mid", mid), ("min", lo),
-                          ("max", hi))[which]
-            out.append("T,%d,%s,%s" % (ms, name, ",".join(str(v) for v in vals)))
-        slot += 1
+        # ONE T line, at the calibration -- not a cycling mid/min/max dump.
+        # The bit field above depends on `mid`, so this is genuinely a
+        # coherence test: a reader that ignores the T line still sees the bits,
+        # but only one that uses it can say WHICH threshold decided them.
+        if calibrated and ms == CAL_MS:
+            out.append("T,%d,mid,%s" % (ms, ",".join(str(v) for v in mid)))
 
     return out
 
@@ -225,13 +261,16 @@ def header(spec, generated_by):
         "# %s: %s." % (spec["file"], spec["what"]),
         "# %s" % spec["verdict"],
         "#",
-        "# INVENTED VALUES.  Every ADC count, threshold and gyro reading below",
-        "# was produced by scripts/make_health_fixtures.py from a toy model of",
-        "# the bar -- it is not a recording of anything.  It tests that",
-        "# parse_telemetry.py and bt_monitor.py agree on the H/T wire format and",
-        "# reach the verdict they should.  It is NOT evidence about any physical",
-        "# sensor, and passing it says nothing about hardware.  The sensor that",
-        "# matters can only be checked by watching the real robot.",
+        "# INVENTED VALUES.  Every bit, threshold and gyro reading below was",
+        "# produced by scripts/make_health_fixtures.py from a toy model of the",
+        "# bar -- it is not a recording of anything.  The bits are the toy",
+        "# model's ADC passed through the firmware's own comparison (see",
+        "# bits_from()), which is the only way to fake an H line: the ADC",
+        "# itself never goes on the wire.  It tests that parse_telemetry.py and",
+        "# bt_monitor.py agree on the H/T wire format and reach the verdict they",
+        "# should.  It is NOT evidence about any physical sensor, and passing it",
+        "# says nothing about hardware.  The sensor that matters can only be",
+        "# checked by watching the real robot.",
         "#",
     ]
     lines += ["# " + n if n else "#" for n in spec["notes"]]
@@ -254,7 +293,7 @@ def main():
     sys.path.insert(0, HERE)
     import parse_telemetry as pt
 
-    today = "2026-09-23"
+    today = "2026-09-24"
     written = []
     for spec in SPECS:
         body = build(spec)
@@ -279,7 +318,7 @@ def main():
             if kind in ("H", "T"):
                 model.feed(kind, rec)
         worst = model.worst()
-        want = "FAIL" if spec["pinned_rail"] else "OK"
+        want = "FAIL" if spec["stuck_black"] else "OK"
         if worst != want:
             print("  REFUSING to write %s: verdict is %s, expected %s"
                   % (spec["file"], worst, want))

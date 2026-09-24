@@ -145,7 +145,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
         @{ File = "capture_health_ok.txt";    Want = 0; Args = @("--health")
            What = "0 health FAIL" },
         @{ File = "capture_health_fault.txt"; Want = 1; Args = @("--health")
-           What = "1 health FAIL (S7 pinned, thresholds uncalibrated)" }
+           What = "1 health FAIL (S7 stuck black, no calibration)" }
     )
     foreach ($r in $replays) {
         $fix = "$TEST/fixtures/$($r.File)"

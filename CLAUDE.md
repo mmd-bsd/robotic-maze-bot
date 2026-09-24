@@ -76,7 +76,7 @@ USE_TELEMETRY=1 bash scripts/build_firmware.sh  # the supervised bring-up build
 bash scripts/measure_solver_ram.sh              # the 8 KB RAM budget, per object
 ```
 
-Uses Keil's own **ARM Compiler 5** (`uAC6=0`, `C:\Keil_v5\ARM\ARMCC\bin`) — **not** armclang. The brain-driven build is **40820 / 65536 flash, 6832 / 8192 RAM (1360 B free)**; run `measure_solver_ram.sh` before claiming anything fits.
+Uses Keil's own **ARM Compiler 5** (`uAC6=0`, `C:\Keil_v5\ARM\ARMCC\bin`) — **not** armclang. Measured 2026-09-24: the plain brain-driven build is **40080 / 65536 flash, 6832 / 8192 RAM (1360 B free)**; the `USE_TELEMETRY=1` bring-up build costs 2 KB more flash and 80 B more RAM (**42124 / 6912**, 1280 B free). Run `measure_solver_ram.sh` — or rather, re-link — before claiming anything fits.
 
 ### Shell note
 
@@ -139,7 +139,7 @@ robot codes/
 **`maze_config.h` is the single tuning point** — memory limits, motion params, algorithm thresholds, with compile-time `#error` validation. Don't scatter new constants into the modules.
 
 **C constraints that bind any change:**
-- All arrays are **statically sized, no `malloc`** (`MAZE_MAX_NODES=64`, `MAZE_MAX_EDGES=112`). Adding a struct field is a RAM-budget decision — the whole firmware has 1360 B free. Note `brain.c` keeps its own `s_home[193]` / `s_fast[193]`, which `main.c` then copies into `path_back` / `path_discoverd_s`; pointing them at caller-supplied buffers would free 386 B if the margin ever gets tight.
+- All arrays are **statically sized, no `malloc`** (`MAZE_MAX_NODES=64`, `MAZE_MAX_EDGES=112`). Adding a struct field is a RAM-budget decision — the whole firmware has 1360 B free (1280 B in the telemetry build). Note `brain.c` keeps its own `s_home[193]` / `s_fast[193]`, which `main.c` then copies into `path_back` / `path_discoverd_s`; pointing them at caller-supplied buffers would free 386 B if the margin ever gets tight.
 - Motion params are **fixed-point ×100** (`MAZE_V_MAX_FP`, `MAZE_ACCEL_FP`), but time math uses `float` (proof/fast-run run infrequently).
 - `MAZE_V_MAX_FP` must stay in sync with the value the early-stop proof uses, or the proof becomes inadmissible.
 - `MazeHeading` deliberately matches firmware `nav` (0=N, 1=W, 2=S, 3=E). `MazeCommand` is the char `'F'/'L'/'R'/'B'`; `maze_cmd_to_cross()` maps it to firmware `cross` (0/1/2/4). Don't "fix" these to a cleaner ordering — they mirror hardware.
@@ -247,7 +247,7 @@ right_poss = s[7] && (s[3]||s[4]||s[5]||s[6])  =  s[7] && front
 | `cd "final version of seyed/robot codes" && python scripts/run_maze.py ../simulator/mazes/<file>.json` | Test any maze with the C solver |
 | `cd "final version of seyed/robot codes" && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build_all.ps1` | Rebuild + run C tests (21) |
 | `cd "final version of seyed/robot codes" && python scripts/run_brain.py ../simulator/mazes/real_field.json` | Decision core vs a robot model (7/7) |
-| `cd "final version of seyed/robot codes" && python scripts/bt_monitor.py` | **Live Bluetooth capture + virtual-brain decision check** (needs `pip install pyserial`) |
+| `cd "final version of seyed/robot codes" && python scripts/bt_monitor.py` | **Live Bluetooth capture + virtual-brain decision check** (needs `pip install pyserial`; opens COM9 — the bench adapter, `DEFAULT_PORT` — by itself when enumerated) |
 | `cd "final version of seyed/robot codes" && python scripts/bt_monitor.py --replay test/fixtures/capture_agree.txt --headless` | Re-run a capture with no robot; exit 1 on any mismatch |
 | `cd "final version of seyed/robot codes" && bash scripts/build_firmware.sh` | Build + link the STM32 firmware (ARMCC 5) |
 | `cd "final version of seyed/robot codes" && bash scripts/measure_solver_ram.sh` | Check the 8 KB RAM budget |

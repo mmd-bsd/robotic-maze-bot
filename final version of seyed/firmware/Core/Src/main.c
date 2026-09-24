@@ -80,6 +80,12 @@ int end_zone_timer = 0;
 /////////	Gyro & Angle
 _Bool									GyroCalF=0;
 uint16_t							GyroCalTimer=0;
+/* Gyro_Z and Gyro_Z_Offset are RAW LSB counts off the LSM6DS3TR (2000 dps full
+   scale, 0.070 dps/LSB), NOT deg/s.  Z_Angle is the only thing in deg: it is
+   what the integration in Calculate_Z_Angle() produces.  Anything that wants a
+   rate in deg/s must scale by ANGULAR_RATE_SENSITIVITY_2000DPS itself -- the
+   health line does, and did not for a while, which is why it once reported a
+   standing robot at -15 deg/s. */
 float 								Gyro_Z=0,Gyro_Z_Offset=0,Z_Angle=0,Z_AngleSetPoint=0;
 
 
@@ -516,6 +522,14 @@ uint16_t    cal_time=185;
 int         calibrat_now=0,loop_start=0;
 int16_t cct = 0;
 
+#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+/* calibr_ir() sits ABOVE the telemetry block, but it is where the one and only
+   T line is sent from, so it needs the stamp that block defines.  A forward
+   declaration rather than moving tlm_ms up here: the variable belongs with the
+   1 ms timebase comment that explains what it means. */
+extern volatile uint32_t tlm_ms;
+#endif
+
 void calibr_ir()
 {
 	     // BUZZER(1);	
@@ -561,9 +575,24 @@ void calibr_ir()
 								
 							 }	
 							 
-							BLT_SendData(sprintf(BLT_TX_Buffer,"%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u,%4u \r\n",IR_mid[0],IR_mid[1],IR_mid[2],
-			        IR_mid[3],IR_mid[4],IR_mid[5],IR_mid[6],IR_mid[7],IR_mid[8],IR_mid[9],IR_mid[10],IR_mid[11],IR_mid[12],IR_mid[13],
-			        IR_mid[14],IR_mid[15],IR_mid[16],IR_mid[17]));
+							/* ONE T line, ONCE, the moment the calibration finishes.
+							   A threshold is WRITTEN when the calibration runs, so this
+							   is the only moment there is anything to say about it; the
+							   old form was a bare list of IR_mid that no parser could
+							   read, and the health stream then cycled mid/min/max
+							   forever to carry the same numbers.  Under both telemetry
+							   macros, so a diagnostic build still reports its own
+							   calibration; a plain build sends nothing, as before. */
+#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+							{
+								char* q = BLT_TX_Buffer;
+								q += sprintf(q, "T,%lu,mid", (unsigned long)tlm_ms);
+								for (int i = 0; i < 18; i++)
+									q += sprintf(q, ",%u", IR_mid[i]);
+								sprintf(q, "\r\n");
+								BLT_SendData(strlen(BLT_TX_Buffer));
+							}
+#endif
 					}
 			}
 }
@@ -838,35 +867,61 @@ static unsigned tlm_rear(void)
    banner again" button.  Bench bring-up wants statuses, not a run.
 
    LINE FORMAT   (times are ms since reset, from the shared 1 ms TIM14 tick)
-     H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>      20 Hz
-     T,<ms>,<what>,<v0>,...,<v17>       what = mid|min|max     ~0.35 s, cycling
+     H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<b0>,...,<b17>      20 Hz
+     T,<ms>,mid,<v0>,...,<v17>          ONCE, when a calibration finishes
 
    <keys>  = hex bitmask, live: 1 = KEY1 (PB5), 2 = KEY2 (PC15), 4 = KEY3 (PC14)
    <loop>  = loop_start, so the app can say which state the robot is in
    <head>  = which bank leads (0 = the front row, which is what the bench is)
    <gz>    = Gyro_Z  in deg/s  x 10      }
    <za>    = Z_Angle in deg    x 10      } integers on purpose -- see below
-   <a*>    = IR_ADC[0..17], the raw sensor array, which is the ground truth
-   <v*>    = IR_mid / IR_min / IR_max, the calibration evidence
+   <b*>    = 1 = pad over BLACK, 0 = white -- COMPUTED HERE, see below
+   <v*>    = IR_mid[0..17], the calibration evidence, sent once
 
    WHY THE GYRO IS SENT AS INTEGERS.  This firmware links no float printf at all
    today; a single %.1f would pull in the float formatter for 1-2 KB of flash.
    x10 keeps 0.1 degree resolution and costs nothing.
 
-   WHY THERE IS NO s[]/front/rear MASK HERE.  On the bench s[] is still all
-   zero: the hysteresis block that fills it lives in the superloop, and the
-   one-shot init runs only after KEY1.  A mask computed here would therefore be
-   a third derivation of the same thing rather than the firmware's own value.
-   The app derives the logical bit from a* vs mid*, and the S/J lines remain the
+   <gz> IS A RATE AND <za> IS AN ANGLE, AND ONLY ONE OF THEM NEEDS A SCALE.
+   Gyro_Z holds RAW LSB (0.070 dps/LSB at the 2000 dps full scale this build
+   configures) -- the sensitivity conversion lives inside Calculate_Z_Angle()'s
+   integration step and its output lands in Z_Angle, never back in Gyro_Z.  So
+   the line below multiplies Gyro_Z by ANGULAR_RATE_SENSITIVITY_2000DPS before
+   scaling to x10, and Z_Angle by 10 alone.  Sending Gyro_Z unscaled is what
+   this did until 2026-09-24: the field was labelled deg/s and was a raw count,
+   reading ~14x high (1/0.070), so a robot standing still was reported at
+   -15 deg/s while its angle sat still and correct.
+
+   WHY THE BITS ARE 0/1 AND NOT THE RAW IR_ADC[] VALUES.  The raw array was 18
+   numbers of 3-4 digits per line -- about 40 bytes of the 20 Hz stream spent on
+   values nothing reads.  What is wanted from the bench is which pads are over
+   black, and that is ONE comparison per pad:
+
+       b[i] = (IR_ADC[i] <= IR_mid[i] - 500)
+
+   the firmware's own entry-into-black test, the same one the one-shot init uses
+   to set s[].  The line therefore carries the DECISION, not the evidence for
+   it, which is the one thing this loses: the app can no longer re-derive the
+   bit its own way and compare.  The threshold line below is what keeps the
+   decision checkable after the fact -- it is the only other number needed.
+
+   WHY NOT s[] ITSELF.  On the bench s[] is still all zero: the hysteresis block
+   that fills it lives in the superloop, and the one-shot init runs only after
+   KEY1.  So s[] is the ONE thing an H line cannot carry while standing still,
+   and the bit above is computed at send time instead.  The S/J lines remain the
    authority on what the firmware believed while it was driving.
 
-   WHY THE THRESHOLDS ARE THREE LINES AND NOT ONE.  BLT_SendData() restarts the
-   TX DMA from scratch (Hardware.c:135), so a long line is a long window in
-   which anything else would truncate it.  mid/min/max are 18 values each; sent
-   one array per line they stay about the length of an H line. */
+   WHY THE THRESHOLDS ARE SENT ONCE, ON CALIBRATION.  They change only when a
+   calibration writes them.  Cycling mid/min/max through the stream forever --
+   the old scheme, one T line in every 7 slots -- spent a third of the bench
+   bandwidth restating a number that had not moved since KEY2, and the raw ADC
+   array is gone now anyway, so there is nothing left for min/max to be compared
+   against.  A calibration that yaws a full turn writes IR_mid once and sends it
+   once.  BLT_SendData() restarts the TX DMA from scratch (Hardware.c:135), so a
+   long line is a long window in which anything else would truncate it; `mid` is
+   18 values and stays about the length of an H line. */
 volatile uint8_t health_div      = 0;  /* 1 ms divider -> health_due every 50 ms */
 volatile _Bool   health_due      = 0;  /* set by the 1 ms tick, cleared here    */
-static   uint16_t health_slot    = 0;  /* send counter: picks H vs which T      */
 
 /* THE LINK HANDSHAKE.  The firmware's own `Hi ,mmdi` banner goes out once, at
    reset -- which is BEFORE anyone has connected, so on a fresh capture it is
@@ -898,32 +953,34 @@ static void health_send(void)
 	int i;
 	char* p = BLT_TX_Buffer;
 
-	/* Every 7th slot carries a threshold line instead of a sensor line, so the
-	   three arrays refresh about once a second -- all a calibration value needs
-	   -- and the sensor stream keeps a steady 20 Hz. */
-	if ((health_slot % 7) == 6)
+	/* EVERY slot is an H line now.  The threshold lines are gone from the
+	   stream -- see "WHY THE THRESHOLDS ARE SENT ONCE" above -- so the 20 Hz
+	   stream is 20 H lines a second and nothing else. */
+	/* THE RATE NEEDS ITS SCALE HERE, THE ANGLE DOES NOT.
+	   Gyro_Z is RAW LSB from LSM_ReadGyroZ() (2000 dps full scale), not deg/s
+	   -- the multiplication by ANGULAR_RATE_SENSITIVITY_2000DPS happens inside
+	   Calculate_Z_Angle()'s integration and its result is stored in Z_Angle,
+	   never back into Gyro_Z.  Sending Gyro_Z bare therefore published a raw
+	   count under a deg/s label, which reads ~14x too big (1/0.070 = 14.3):
+	   a perfectly still robot reported -15 deg/s.  Z_Angle was right all along
+	   for the same reason, which is exactly what made the pair look odd. */
+	p += sprintf(p, "H,%lu,%X,%d,%d,%d,%d",
+	             (unsigned long)tlm_ms, health_keys(),
+	             loop_start, head,
+	             (int)(Gyro_Z * ANGULAR_RATE_SENSITIVITY_2000DPS * 10.0f),
+	             (int)(Z_Angle * 10.0f));
+	for (i = 0; i < 18; i++)
 	{
-		unsigned           which = (health_slot / 7) % 3;
-		const char*        name  = (which == 0) ? "mid"
-		                         : (which == 1) ? "min" : "max";
-		const uint16_t*    v     = (which == 0) ? IR_mid
-		                         : (which == 1) ? IR_min : IR_max;
-
-		p += sprintf(p, "T,%lu,%s", (unsigned long)tlm_ms, name);
-		for (i = 0; i < 18; i++) p += sprintf(p, ",%u", v[i]);
-		sprintf(p, "\r\n");
+		/* The bit is COMPUTED, not read from s[] -- s[] is all zero on the
+		   bench (see the block comment).  Cast to int so the comparison is
+		   signed: IR_mid[i] can be smaller than 500 before a calibration, and
+		   an unsigned `IR_mid[i] - 500` would wrap to ~65000 and call every
+		   pad white. */
+		p += sprintf(p, ",%d",
+		             ((int)IR_ADC[i] <= (int)IR_mid[i] - 500) ? 1 : 0);
 	}
-	else
-	{
-		p += sprintf(p, "H,%lu,%X,%d,%d,%d,%d",
-		             (unsigned long)tlm_ms, health_keys(),
-		             loop_start, head,
-		             (int)(Gyro_Z * 10.0f), (int)(Z_Angle * 10.0f));
-		for (i = 0; i < 18; i++) p += sprintf(p, ",%u", IR_ADC[i]);
-		sprintf(p, "\r\n");
-	}
+	sprintf(p, "\r\n");
 
-	health_slot++;
 	BLT_SendData(strlen(BLT_TX_Buffer));
 }
 

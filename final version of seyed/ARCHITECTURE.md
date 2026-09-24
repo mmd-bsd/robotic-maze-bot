@@ -213,6 +213,10 @@ Both streams are read by the same two tools, which go through one parser
 (`scripts/parse_telemetry.py`) so they cannot drift: `bt_monitor.py` for live
 capture and a virtual-brain decision check, `parse_telemetry.py` for the offline
 report. `bt_monitor.py --health` switches the same pipeline to the bench verdict.
+In the GUI the picture and the cards are **two independent switches** (`Canvas:
+diag | path draw`, `Cards: health | mission`), both following the capture's line
+kinds until clicked; `--health` pins both. Since 2026-09-24; they were one
+button, which made "health cards up beside the map" unaskable.
 
 The robot also **announces itself**: the `Hi ,mmdi` banner goes out on reset, and
 under `USE_MAZE_HEALTH` the USART RX interrupt makes any received byte produce the
@@ -374,5 +378,6 @@ These are hard-won; keep them in mind before changing the simulator.
   (`USE_MAZE_HEALTH`) for what the hardware *reads* while stopped.  The health
   view is the static test for the open `in.front` corner defect (rule 9 below):
   park the robot on a corner by hand and read the centre group and the gate off
-  the screen, with no drive and no `J` line needed.  Neither can validate the
+  the screen, with no drive and no `J` line needed.  (The pad board is the canvas's
+  `diag` picture; `--health` pins it.)  Neither can validate the
   brain's *model* of the robot — only the robot can, which is why both exist.

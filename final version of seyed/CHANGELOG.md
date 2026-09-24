@@ -145,6 +145,138 @@
 
 ## History (newest first)
 
+### 2026-09-24 — Gyro_Z was a raw count wearing a deg/s label (~14x too big)
+
+**Reported:** *"gyro_z unit is wrong for sure it cant be deg/sec its much bigger.
+but angle is correct."* Both halves of that were true, and for one reason.
+
+**The bug.** `Gyro_Z` holds **raw LSB** off the LSM6DS3TR, not degrees/s:
+`LSM_ReadGyroZ()` returns the bare `int16_t` register pair, and the conversion
+to real units lives *inside* the integration step —
+`Z_Angle += Gyro_Z * (ANGULAR_RATE_SENSITIVITY_2000DPS / 500)` — whose result is
+stored in `Z_Angle` and never written back into `Gyro_Z`. The `H` line then sent
+`(int)(Gyro_Z * 10.0f)` under a `deg/s x 10` label, so the field published a
+count: **1 / 0.070 = 14.3x too large**. A robot standing perfectly still reported
+≈ -15 deg/s while `Z_Angle` sat still and correct — the angle was right all along
+because it is the one place the sensitivity multiplication actually happens,
+which is exactly what made the pair look contradictory.
+
+**Fix.** One multiply at the send site,
+`(int)(Gyro_Z * ANGULAR_RATE_SENSITIVITY_2000DPS * 10.0f)`, plus a note at the
+`Gyro_Z` declaration (raw LSB, not deg/s) and a paragraph in the telemetry doc
+block: **of the two gyro fields one is a rate and one is an angle, and only the
+rate needs scaling.** No host change — `GYRO_STILL_DPS = 5.0` was always deg/s,
+it just never had a real deg/s value to compare against.
+
+**Verified:** ARMCC 5 links both builds — plain 40080 / 6832 unchanged;
+`USE_TELEMETRY=1` **42124** / 6912 (+24 B flash for the multiply, RAM identical,
+1280 B free). `build_all.ps1` exit 0, 25-check Tk pass green.
+
+### 2026-09-24 — The health wire: 18 bits instead of 18 ADC counts, and `IR_mid` once
+
+**What changed.** The `H` line carries `b0..b17`, **1 = black / 0 = white**,
+computed in the firmware at send time as `IR_ADC[i] <= IR_mid[i]-500` (the same
+entry-into-black test the one-shot init uses). The `T` line carries `IR_mid[]`
+only, and is sent **once**, from `calibr_ir()` when the calibration finishes,
+instead of cycling mid/min/max through the 20 Hz stream forever. Requested
+because nothing read 18 raw counts at 20 Hz; the bench question is which pads are
+over black, which is one comparison.
+
+**Why computed in the firmware, not derived on the host.** `s[]` is all-zero on
+the bench (its hysteresis block lives in the superloop; the one-shot init runs
+only after KEY1), so the bit has to be made at send time. The C uses
+`((int)IR_ADC[i] <= (int)IR_mid[i] - 500)` — both casts deliberate, or a
+`IR_mid[i] < 500` wraps the `uint16_t` subtraction and every pad reads black.
+
+**The cost, stated rather than buried.** The line now carries the *decision*, not
+the evidence for it: the host cannot re-derive the bit, so every check needing
+the magnitude of a reading is gone. Two consequences worth knowing:
+- "Every channel reads 0 → the emitters are unpowered" is no longer provable —
+  a dead emitter bar and a robot parked on white field produce identical bits. It
+  downgraded FAIL → INFO and now names the one-second test that separates them
+  (park on the line, read again).
+- The old "channel never even wobbled → dead pad" WARN is **inverted**: a bit
+  cannot wobble, and most pads sit on one surface for a whole capture, so that
+  WARN would fire on every healthy capture. It is an INFO now.
+What survives: a pad stuck black while its neighbours move (FAIL, and what
+`capture_health_fault.txt` plants), a pad never tested against the line, and a
+pad never changing at all.
+
+**Files:** `firmware/Core/Src/main.c` (H bits, one-shot `T` in `calibr_ir`, the
+`extern tlm_ms` forward declaration it needs, doc block), `parse_telemetry.py`
+(`SensorStat` on bits, `findings()`, SENSORS/THRESHOLDS report tables, the `PADS`
+card), `bt_monitor.py` (pad colour **and the 0/1 under each pad name**, CSV `adc`
+→ `bits`), `make_health_fixtures.py` (fault is now *stuck black*, not
+pinned-at-rail; the fault file sends no `T` at all), `build_all.ps1` wording,
+`BUILD_GUIDE.md` / `STATUS.md`.
+
+**Correction, same day: the display first showed a hold count per pad.** The
+first version of the app side printed the pad's run length under its name (the
+last magnitude the bits leave), and a `mid + blk/wht counts` table — so the
+board showed numbers that were not 0/1 even though the wire was correct. The
+user's rule is about the *readout* as much as the wire: **the board shows 0/1
+per sensor and nothing else.** The canvas now prints the pad's bit, and the card
+is two columns, `pad  IR_mid  bit` — the threshold beside the bit it decided,
+which is the pair the user asked to see — with **no word column** (a `note`
+column made the table unreadable; every verdict it carried is on CHECKS
+already). The offline report's per-pad counts stay — that is a report, not the
+live board.
+
+**Also caught in the same pass: I had the calibration key wrong.** The "no T
+line" warning said *press KEY3*, and the fixture put its calibration on the KEY3
+press. KEY3 is the **gyro** calibration; the IR one is **KEY2**, in the bench loop
+(`main.c:1463`) and in a run (`main.c:1562`) alike. The warning, `CAL_MS` and the
+fixture comments are corrected; the healthy fixture's `T` line now lands at
+900 ms, right after the KEY2 press at 850.
+
+**Verified:** ARMCC 5 links both builds — plain **40080 flash / 6832 RAM**
+(unchanged, so the bit change costs no RAM), `USE_TELEMETRY=1` 42124 / 6912,
+1280 B free. `build_all.ps1` exit 0 (21 unit tests, oracle selftest, 2 decision
+replays, 2 health replays — ok = 0, fault = 1 FAIL + 2 WARN as intended), plus a
+25-check Tk pass over both fixtures, because the headless replays never run a
+drawing callback.
+
+**Gotchas.** A nested `/* … */` inside the new firmware doc block broke the build
+(`Warning #9-D` then eight cascading errors) — ARMCC's comment nesting is not a
+style issue, it is a hard error. And `calibr_ir()` sits *above* the telemetry
+block, so the `T` line needed an `extern volatile uint32_t tlm_ms;` (the
+definition stays with the timebase comment, which is where it belongs).
+
+### 2026-09-24 — `bt_monitor.py`: two switches, and COM9 by default
+
+**Two independent switches.** `Canvas: diag | path draw` picks the picture (the
+18-pad board, or the believed map and trail); `View:` (now **`Cards:`**) picks
+the card column. They were one button, so the health cards could not stay up
+beside the map — the normal bench thing to want. Both follow the line kinds
+(`H`/`T` → bench, `J`/`S`/`B`/`Z` → mission) until clicked; **a click pins only
+its own switch**; `--health` pins both and stops the following. The link-status
+label moved to `pack(side="right")` so the extra button cannot clip
+`link error: …` off the toolbar.
+
+**COM9 is the default port** (`DEFAULT_PORT` in `bt_monitor.py`), pre-selected
+and opened at start-up when a port of that name is enumerated, so bring-up is
+one command. The match is on the **name only** (no VID/PID test): if the adapter
+returns as a different COM number, edit that constant or pass `--port`. Absence
+is silent (nothing selected, nothing opened); `--replay`/`--demo` never open a
+port; an explicit `--port` wins and is still opened even if unenumerated.
+Refresh re-applies the preference, because Windows creates the SPP port when the
+link is *paired* — usually after the app was started — but a port picked by hand
+is never stolen back.
+
+**Files:** `robot codes/scripts/bt_monitor.py`; `STATUS.md`, `ARCHITECTURE.md`
+and the root `CLAUDE.md` for the two behaviours.
+
+**Verified:** 22 canvas-switch checks, 14 port-behaviour checks, and
+`build_all.ps1` exit 0. Live on the robot: COM9 read directly gives `H` lines at
+~20 Hz (121 in 6 s, `keys=0 loop=0`), and the app auto-opened it and followed
+the arriving lines.
+
+**Gotcha, twice.** A GUI smoke test must `root.withdraw()` **and** stub
+`list_ports`. A mapped window takes real desktop clicks during `update()` (the
+canvas toggled itself), and with the adapter paired the app opens COM9 and the
+robot's 20 Hz stream moves both switches before the first assertion. Both looked
+like logic bugs in the code under test.
+
 ### 2026-09-23 — The health panel scrolls, and the THRESHOLDS table scrolls inside it
 
 **What changed.** `bt_monitor.py`'s right-hand panel could not fit its own cards.

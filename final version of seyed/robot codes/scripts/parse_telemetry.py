@@ -21,8 +21,8 @@ LINE FORMAT (see the block comment in firmware/Core/Src/main.c)
   J,<ms>,<ch>,<nav>,<head>,<raw>,<cm>,<front>,<rear>,<L>,<R>,<cross>,<target>,<dist>,<node>
   B,<ms>,<node>,<x>,<y>,<drift>,<move>                 bring-up pause only
   Z,<ms>,<state>                                       target zone enter/leave
-  H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>     20 Hz, health build
-  T,<ms>,<what>,<v0>,...,<v17>        what=mid|min|max    ~0.35 s, health build
+  H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<b0>,...,<b17>     20 Hz, health build
+  T,<ms>,mid,<v0>,...,<v17>          ONCE, when a calibration finishes
 
   <front> = s[0..9] as hex, bit i = s[i]
   <rear>  = s[10..17] as hex, bit i = s[10+i]
@@ -45,18 +45,30 @@ LINE FORMAT (see the block comment in firmware/Core/Src/main.c)
   <gz>    = Gyro_Z  in deg/s x 10   } integers on purpose: this firmware links
   <za>    = Z_Angle in deg   x 10   } no float printf at all, and one %.1f
                                       would pull the formatter in for 1-2 KB
-  <a*>    = IR_ADC[0..17], the raw sensor array
-  <v*>    = IR_mid / IR_min / IR_max -- the calibration evidence, three arrays
-            on three separate lines rather than one 54-value line, because
-            BLT_SendData() restarts the TX DMA and a long line is a long window
-            in which an event would truncate it
+  <b*>    = 1 = that pad is over BLACK, 0 = white.  COMPUTED IN THE FIRMWARE as
+            `IR_ADC[i] <= IR_mid[i] - 500` (main.c:1350-1351), the same
+            entry-into-black test its one-shot init uses to set s[].  The raw
+            ADC array is NOT on the wire any more: 18 numbers per line at 20 Hz
+            were ~40 bytes of stream that nothing read, and the pads' black/white
+            state is the whole of what the bench wants from them.
+  <v*>    = IR_mid[0..17].  Sent ONCE, when a calibration finishes -- a
+            threshold changes only when a calibration writes it, so the old
+            mid/min/max cycle restated an unmoving number forever.  min/max are
+            not sent at all now: with the raw ADC gone there is nothing left for
+            them to be compared against, so what they were used for (did a pad
+            ever see both white and black?) is answered from <b*> instead.
+            BLT_SendData() restarts the TX DMA, so one array per line it stays
+            about the length of an H line.
 
-  There is deliberately NO s[]/front/rear mask on an H line.  On the bench s[]
-  is still all zero -- the hysteresis block that fills it lives in the superloop
-  and its one-shot init runs only after KEY1 -- so a mask here would be a third
-  derivation of the same thing rather than the firmware's own value.  Derive it
-  from <a*> vs <v*> instead (HealthModel does exactly that), and read the S/J
-  lines for what the firmware actually believed while it was driving.
+  THE TRADE AN H LINE MAKES.  It carries the firmware's DECISION per pad, not
+  the evidence for it, so this tool can no longer re-derive the bit its own way
+  and cross-check the two -- the bit IS the derivation now.  What keeps the
+  decision checkable is the threshold line: with <v*> in hand, "was that pad
+  over black" is one subtraction away.  There is still deliberately no
+  s[]/front/rear mask on an H line: on the bench s[] is all zero (the hysteresis
+  block that fills it lives in the superloop and its one-shot init runs only
+  after KEY1), so a mask would be the firmware's stored value rather than its
+  live one.  Read the S/J lines for what it believed while it was driving.
 
   NOTE ON <ch>: this used to be the legacy explorer's own decision, and it was
   logged AFTER the move was chosen.  It is now the brain's move, so the J line
@@ -240,9 +252,9 @@ def loop_state(n):
     a state this table has not heard of is worth noticing, not hiding."""
     return LOOP_STATES.get(n, "unknown state %s" % n)
 
-RAIL = 4095          # 12-bit ADC full scale
-BAND = 50            # the firmware's hysteresis half-width (main.c:1775-1779)
-INIT_HI, INIT_LO = 100, 500   # the wider one-shot init band (main.c:1183-1184)
+# What IR_mid holds before calibr_ir() ever ran (main.c: `IR_mid[18] = {1400,...}`).
+# Seeing all 18 at this value in a T line means no calibration happened.
+DEFAULT_MID = 1400
 KEY_STUCK_MS = 8000  # a button held this long is stuck, not pressed
 # A standing robot's gyro rate.  Every H line is a STOPPED state by
 # construction (the firmware only streams health when it is not driving), so
@@ -352,13 +364,23 @@ def parse_line(line, lineno=0):
         # have called every real H line BAD; make_health_fixtures.py refuses to
         # write a fixture that does not round-trip, which is what caught it.)
         if f[0] == "H" and len(f) == 25:
+            bits = [int(x) for x in f[7:25]]
+            if any(b not in (0, 1) for b in bits):
+                # The firmware writes one 0 or 1 per pad.  Anything else on
+                # those 18 fields is a different build or a mangled line, and
+                # both are worth calling BAD rather than coercing to a "1" --
+                # silently treating IR_ADC[3] as black would turn the pads into
+                # a plausible-looking map of nothing.
+                raise ValueError("H bit field is not 0/1")
             return "H", {
                 "ms": int(f[1]), "keys": int(f[2], 16), "loop": int(f[3]),
                 "head": int(f[4]),
                 # Stored as the wire's integer tenths; scaled here so every
                 # consumer sees deg/s and deg and none of them re-does the /10.
                 "gz": int(f[5]) / 10.0, "za": int(f[6]) / 10.0,
-                "adc": [int(x) for x in f[7:25]],
+                # 1 = over BLACK.  The firmware's decision, not a raw reading;
+                # see the module docstring.
+                "bits": bits,
             }
         if f[0] == "T" and len(f) == 21 and f[2] in ("mid", "min", "max"):
             return "T", {"ms": int(f[1]), "what": f[2],
@@ -418,44 +440,55 @@ def parse(path):
 # ==========================================================================
 
 class SensorStat:
-    """Running per-channel statistics for one capture or one live session."""
+    """One pad's 0/1 history for a capture or a live session.
 
-    __slots__ = ("n", "lo", "hi", "last", "changes", "run_lo", "run_hi",
-                 "max_run_lo", "max_run_hi", "in_band")
+    BITS, NOT ADC.  The wire carries the firmware's own decision per pad (see
+    the module docstring), so there is no distribution here to average or to
+    run out to a rail: what a bench check can ask of a bit is whether it ever
+    moved, and which way it ever went.  That second question is the one the old
+    ADC statistics could only INFER -- "never black" had to be reconstructed
+    from a minimum against a mid -- and here it is the count itself.
+    """
+
+    __slots__ = ("n", "last", "changes", "ones", "zeros",
+                 "run_black", "run_white", "max_run_black", "max_run_white")
 
     def __init__(self):
         self.n = 0                  # samples seen
-        self.lo = None              # smallest value seen
-        self.hi = None              # largest value seen
-        self.last = None
-        self.changes = 0            # how many times the value moved at all
-        self.run_lo = 0             # current run of samples pinned at 0
-        self.run_hi = 0             # current run of samples at the 12-bit rail
-        self.max_run_lo = 0
-        self.max_run_hi = 0
-        self.in_band = 0            # samples inside the firmware's dead band
+        self.last = None            # newest bit
+        self.changes = 0            # how many times the bit moved
+        self.ones = 0               # samples reading BLACK
+        self.zeros = 0              # samples reading white
+        self.run_black = 0          # current run of consecutive black
+        self.run_white = 0
+        self.max_run_black = 0
+        self.max_run_white = 0
 
     @property
-    def span(self):
-        return 0 if self.lo is None else self.hi - self.lo
+    def saw_black(self):
+        return self.ones > 0
 
-    def feed(self, v, mid):
+    @property
+    def saw_white(self):
+        return self.zeros > 0
+
+    @property
+    def stuck(self):
+        """Only ever one value in this capture.  Fault, or a still robot."""
+        return not (self.saw_black and self.saw_white)
+
+    def feed(self, b):
         self.n += 1
-        self.lo = v if self.lo is None else min(self.lo, v)
-        self.hi = v if self.hi is None else max(self.hi, v)
-        if self.last is not None and v != self.last:
+        if self.last is not None and b != self.last:
             self.changes += 1
-        self.last = v
+        self.last = b
 
-        self.run_lo = self.run_lo + 1 if v == 0 else 0
-        self.run_hi = self.run_hi + 1 if v >= RAIL else 0
-        self.max_run_lo = max(self.max_run_lo, self.run_lo)
-        self.max_run_hi = max(self.max_run_hi, self.run_hi)
-
-        # `mid` is 0 until a T line has arrived.  Nothing valid has a threshold
-        # of 0, so that is a safe "not known yet" and not a magic sentinel.
-        if mid and abs(v - mid) < BAND:
-            self.in_band += 1
+        self.ones += b
+        self.zeros += 1 - b
+        self.run_black = self.run_black + 1 if b else 0
+        self.run_white = self.run_white + 1 if not b else 0
+        self.max_run_black = max(self.max_run_black, self.run_black)
+        self.max_run_white = max(self.max_run_white, self.run_white)
 
 
 class HealthModel:
@@ -504,9 +537,8 @@ class HealthModel:
         gz = abs(rec["gz"])
         self.gz_max = gz if self.gz_max is None else max(self.gz_max, gz)
 
-        mid = self.thr.get("mid")
-        for i, v in enumerate(rec["adc"]):
-            self.stats[i].feed(v, mid[i] if mid else 0)
+        for i, b in enumerate(rec["bits"]):
+            self.stats[i].feed(b)
 
         self._keys(rec["ms"], rec["keys"])
 
@@ -541,23 +573,18 @@ class HealthModel:
 
     # ------------------------------------------------------------- derivation
     def logic(self, i):
-        """Channel i: 1 = BLACK, 0 = white, None = inside the dead band.
+        """Channel i: 1 = BLACK, 0 = white -- the firmware's own bit.
 
-        The firmware has two thresholds, mid-50 (to go black) and mid+50 (to go
-        white), and BETWEEN them the bit is latched rather than decided
-        (main.c:1775-1779).  So for a single sample in the band the only honest
-        answer is "unknown", and saying 0 or 1 there would invent a reading the
-        firmware never made.
+        This used to be a RE-DERIVATION from the raw ADC and could return None
+        for a sample inside the dead band, where the firmware's bit is latched
+        rather than decided.  The wire carries the decision now (see the module
+        docstring), so there is nothing to derive and no unknown: the value here
+        is the one the firmware sent, and `None` survives only for "no H line
+        yet" so callers keep their shape.
         """
-        if self.last is None or "mid" not in self.thr:
+        if self.last is None:
             return None
-        v = self.last["adc"][i]
-        m = self.thr["mid"][i]
-        if v <= m - BAND:
-            return 1
-        if v >= m + BAND:
-            return 0
-        return None
+        return self.last["bits"][i]
 
     @staticmethod
     def _any(bits, idxs):
@@ -577,11 +604,15 @@ class HealthModel:
         """What BrainIn the firmware would build from the pose on the bench.
 
         The SAME arithmetic as main.c's brain_report() and as derive_brainin()
-        below, applied to the raw ADC instead of a latched mask:
+        below, applied to the pads' bits:
           front = any of s[3..6]   left = s[2] && front   right = s[7] && front
         `at_node` is s[0] && s[9], the position gate on the rotation axis, and
         it is printed because a gate pad that never goes black is the single
         most useful thing a bench check can reveal.
+
+        The bits come off the wire rather than out of a comparison here, so this
+        is the firmware's answer to "is this a junction", not a second opinion
+        about it -- which is the check the bench is actually for.
         """
         if self.last is None:
             return None
@@ -604,10 +635,8 @@ class HealthModel:
 
     # --------------------------------------------------------------- findings
     def rows(self):
-        """One dict per channel, for the report and the live table."""
+        """One dict per pad, for the report and the live table."""
         mid = self.thr.get("mid") or [0] * 18
-        lo = self.thr.get("min") or [0] * 18
-        hi = self.thr.get("max") or [0] * 18
         out = []
         for i, st in enumerate(self.stats):
             out.append({
@@ -615,123 +644,135 @@ class HealthModel:
                 # `role` is SENSORS.md's wording; `short` is the same thing in
                 # a column.  Both are here so no caller has to re-derive either.
                 "role": sensor_role(i), "short": sensor_short_role(i),
-                # `now` is the newest sample; lo/hi are the capture's extremes,
-                # so a channel can have a wide range and still sit still now.
-                "now": None if self.last is None else self.last["adc"][i],
-                "lo": st.lo, "hi": st.hi, "span": st.span,
-                "changes": st.changes, "n": st.n,
-                "mid": mid[i], "cal_lo": lo[i], "cal_hi": hi[i],
-                "cal_span": hi[i] - lo[i],
-                "in_band": st.in_band, "logic": self.logic(i),
+                # `now` is the newest bit; saw_black/saw_white are the capture's
+                # whole history, so a pad can have changed and still sit still.
+                "now": None if self.last is None else self.last["bits"][i],
+                "black": st.ones, "white": st.zeros, "n": st.n,
+                "saw_black": st.saw_black, "saw_white": st.saw_white,
+                "changes": st.changes, "max_run_black": st.max_run_black,
+                "max_run_white": st.max_run_white,
+                "mid": mid[i], "logic": self.logic(i),
             })
         return out
 
     def findings(self):
         """-> [(severity, text)], FAIL first.  Severity: FAIL | WARN | INFO.
 
-        POLARITY, because every threshold below depends on it and it is not
-        guessable: the firmware sets s[i]=1 when IR_ADC[i] <= IR_mid[i]-50 and
-        s[i]=0 when IR_ADC[i] >= IR_mid[i]+50 (main.c:1960-1967), and s=1 is
-        BLACK (the lane, and the target).  So a LOW ADC is black and a HIGH ADC
-        is white -- the pad reads high on the reflective field and low on the
-        absorptive line.  It follows that in the calibration IR_max is the
-        WHITE reading and IR_min the BLACK one, which is the opposite way round
-        from how the names read.
+        POLARITY, because every sentence below rests on it and it is not
+        guessable: a bit of 1 is BLACK (the lane, and the target) and 0 is
+        WHITE, and black comes from a LOW reading -- the pad reads high on the
+        reflective field and low on the absorptive line.  (The H line's own bit
+        is `IR_ADC <= IR_mid-500` in main.c's health_send; the driving path
+        latches s[] with the narrower +/-50.  Both put black low.)
+
+        These findings are weaker than they were when the raw ADC was on the
+        wire, and deliberately so: see the module docstring on the trade.  What
+        survives is every fault that shows up as a pad not behaving -- stuck
+        black, stuck white, never tested.  What is gone is anything that needed
+        the magnitude of a reading.
         """
         if not self.h:
             return [("INFO", "no H lines in this capture -- not a health build "
                              "(needs USE_MAZE_HEALTH; see BUILD_GUIDE.md)")]
         fails, warns, infos = [], [], []
-        n = self.h
         rows = self.rows()
         mid_known = "mid" in self.thr
-        all_zero = all(r["hi"] == 0 for r in rows)
+        any_black = any(r["saw_black"] for r in rows)
 
-        # ---- the array as a whole: the loudest and most likely bench fault
-        if all_zero:
-            fails.append("every channel reads 0 for the whole capture -- the IR "
-                         "emitters are unpowered or the mux is stuck, not 18 "
-                         "dead sensors (IR_PWR is PA8, MUX is PA15/PB3/PB4)")
+        # ---- the array as a whole
+        #
+        # WHAT THIS USED TO SAY, AND CANNOT ANY MORE.  With the raw ADC on the
+        # wire, "every channel reads 0 for the whole capture" was a FAIL, and a
+        # correct one: a live 12-bit channel cannot legitimately sit at 0, so
+        # the emitters were unpowered or the mux was stuck.  The bits cannot
+        # tell that from a robot parked on white field, because the firmware has
+        # already collapsed the reading to 0 or 1 -- the evidence that
+        # distinguished them is exactly what was removed.  So this is an INFO
+        # that names both possibilities AND the one-second test that separates
+        # them, rather than a FAIL that would fire on every capture taken off
+        # the line.
+        if not any_black:
+            infos.append("no pad went black for the whole capture.  Either the "
+                         "robot was never over the line -- normal on white field "
+                         "-- or the emitters are unpowered / the mux is stuck "
+                         "(IR_PWR is PA8, MUX is PA15/PB3/PB4).  The bits alone "
+                         "cannot tell these apart: park the robot ON the line and "
+                         "read again, which separates them in one second.")
         if not mid_known:
-            warns.append("no T line yet -- no thresholds on the wire, so nothing "
-                         "can be compared against them")
+            warns.append("no T line in this capture -- no calibration was run, "
+                         "so the thresholds are the firmware's power-on defaults "
+                         "and every bit on this wire was decided against those.  "
+                         "Press KEY2 -- the IR calibration key, in the bench loop "
+                         "and in a run alike -- and capture the line it sends.")
 
         # ---- the calibration itself
         if mid_known:
-            if not any(r["cal_hi"] for r in rows):
-                warns.append("IR_min/IR_max are all zero: the thresholds are the "
-                             "power-on defaults, NOT a calibration -- run one "
-                             "(KEY2 during a run) before trusting any black/white")
-            else:
-                flat = [r["name"] for r in rows if r["cal_span"] < 200]
-                if flat:
-                    warns.append("calibration window under 200 counts on %s -- "
-                                 "those pads never saw both white and black"
-                                 % ", ".join(flat))
+            mid = self.thr["mid"]
+            if all(m == DEFAULT_MID for m in mid):
+                warns.append("every IR_mid is the power-on default (%d): the "
+                             "thresholds are NOT a calibration -- run one (KEY2) "
 
-        # ---- could the one-shot init ever call BLACK on these pads?
+                             "before trusting any black/white"
+                             % DEFAULT_MID)
+            elif not any(mid):
+                warns.append("IR_mid is 0 for every pad -- the calibration "
+                             "produced no threshold at all")
+
+        # ---- was the detection path ever exercised?
         #
-        # There are TWO band definitions and they are not the same.  The live
-        # path uses +/-50 (main.c:1960-1967); the one-shot init that runs just
-        # after KEY1 uses a wider, ASYMMETRIC band (main.c:1350-1351): black
-        # needs adc <= mid-500, white needs adc >= mid+100.  A pad that never
-        # gets 500 under its own mid in a capture was simply never held over
-        # black, and the honest thing to report is that one fact -- NOT a WARN
-        # per pad, because "was this pad over black just now" is not knowable
-        # from the wire and the pads that are legitimately over white would
-        # drown the real faults.  Reporting it at all is the point: it is the
-        # difference between "the detection path passed" and "the detection
-        # path was never exercised".
-        if mid_known and not all_zero:
-            usable = [r for r in rows if r["mid"] and r["lo"] is not None]
-            no_black = [r for r in usable if r["lo"] > r["mid"] - INIT_LO]
+        # The exact question the old min/max reconstruction existed to answer,
+        # and now answered directly: a pad that never went black in a capture
+        # was never tested against the line.  Reporting it is the difference
+        # between "the detection path passed" and "it was never exercised" --
+        # NOT a WARN per pad, because pads legitimately over white would drown
+        # the real faults.
+        if any_black:
+            no_black = [r["name"] for r in rows if not r["saw_black"]]
             if no_black:
-                who = ("all 18 pads" if len(no_black) == len(usable)
-                       else ", ".join(r["name"] for r in no_black))
-                infos.append("never held over black in this capture: %s.  The "
-                             "one-shot init needs adc <= mid-%d to set a pad's "
-                             "s[] bit to black (main.c:1350-1351), so black "
-                             "detection is only exercised on the pads that did "
-                             "dip -- park the robot on the line to test the rest."
-                             % (who, INIT_LO))
+                who = ("all 18 pads" if len(no_black) == 18
+                       else ", ".join(no_black))
+                infos.append("never went black in this capture: %s.  A pad is "
+                             "only tested against the line when it is put over "
+                             "it -- park the robot on the line to exercise the "
+                             "rest." % who)
 
-        # ---- per channel
-        # Whether ANY channel is moving decides how to read a channel that is
-        # not.  On a perfectly still robot every channel holds still and that
-        # is not a fault; on a moving one, a channel that alone never budges is
-        # the interesting one.  Same observation, two very different weights.
+        # ---- per pad
+        #
+        # WHAT "NEVER CHANGED" MEANS NOW, because this is the one rule the bit
+        # format inverts.  With raw ADC on the wire, a pad whose number never
+        # even wobbled was a dead pad -- nothing else explains total stillness
+        # on a 12-bit channel, and the healthy fixture's +/-12 of jitter existed
+        # precisely to prove a channel was alive.  A bit cannot wobble.  Most
+        # pads at any pose are on ONE surface for the whole capture and are
+        # supposed to hold still, so "never changed" is the normal case and a
+        # WARN on it would fire on a healthy capture -- which is worse than no
+        # check at all, because a bench tool that cries wolf gets ignored.
+        #
+        # The dangerous direction survives intact and is the whole reason this
+        # loop exists: a pad reading BLACK for the entire capture, while its
+        # neighbours move, is a phantom lane the brain can see and the robot
+        # cannot drive down -- and it is planted in capture_health_fault.txt.
         moving = any(r["changes"] for r in rows)
-        for r in rows:
-            if all_zero:
-                break                          # already FAILed as an array
-            if r["changes"] == 0 and r["hi"] == 0:
-                # Stuck at 0 means stuck on BLACK.  That is the dangerous
-                # direction: the brain sees a lane, or a whole target row, that
-                # is not there.  A shorted pad and a pad parked over the target
-                # disc look identical, which is why the severity depends on
-                # whether anything else moved.
-                (fails if moving else infos).append(
-                    "%s (%s) sat at 0 for the whole capture%s -- a pad stuck low "
-                    "reads BLACK, i.e. a lane the brain can see and the robot "
-                    "cannot drive down"
-                    % (r["name"], r["short"],
-                       "" if moving else " (if the robot is parked on the target "
-                       "pad, an all-black row is correct -- check the others)"))
-            elif r["changes"] == 0 and r["hi"] >= RAIL:
-                fails.append("%s (%s) is pinned at the %d rail the whole capture "
-                             "-- saturated, or a dead phototransistor: it reads "
-                             "WHITE whatever it is over"
-                             % (r["name"], r["short"], RAIL))
-            elif r["changes"] == 0:
-                (warns if moving else infos).append(
-                    "%s (%s) never changed (%d samples at %d)%s"
-                    % (r["name"], r["short"], r["n"], r["hi"],
-                       "" if moving else " -- the robot may simply be still"))
-            if mid_known and r["in_band"] * 2 > n:
-                infos.append("%s (%s) sat inside the +/-%d dead band for %d%% of "
-                             "the capture -- its s[] bit is LATCHED there, not "
-                             "freshly decided" % (r["name"], r["short"], BAND,
-                                                  100 * r["in_band"] // n))
+        if not moving:
+            infos.append("not one pad changed on this wire -- the robot was "
+                         "still, or the bar was parked on a single surface, so "
+                         "there is nothing per-pad to say.  Move the robot (or "
+                         "the card) across the line to exercise them.")
+        else:
+            for r in rows:
+                if r["changes"] == 0 and r["now"] == 1:
+                    fails.append(
+                        "%s (%s) read BLACK for the whole capture while its "
+                        "neighbours moved -- a pad stuck black is a lane the "
+                        "brain can see and the robot cannot drive down"
+                        % (r["name"], r["short"]))
+                elif r["changes"] == 0:
+                    infos.append(
+                        "%s (%s) held white for the whole capture.  That is NOT "
+                        "by itself evidence of a dead pad -- with only the bits "
+                        "on the wire, a pad reading white is indistinguishable "
+                        "from one that cannot read black at all.  Put it over "
+                        "the line to tell them apart." % (r["name"], r["short"]))
 
         # ---- the pads whose role makes them worth calling out
         d = self.derived()
@@ -856,8 +897,9 @@ def _health_bar(model):
     depends on it -- `s[0] && s[9]` only means "the axis is over a node" if s[0]
     and s[9] really are on the axis.
 
-    `#` = black, `.` = white, `?` = inside the firmware's dead band, where s[]
-    is latched rather than freshly decided.
+    `#` = black, `.` = white.  (It used to be able to say `?` for a pad inside
+    the dead band, where s[] is latched rather than freshly decided; that is not
+    knowable now, so the glyph is only ever the bit the firmware sent.)
 
     This is what makes the open node-gate question answerable from a capture:
     park the robot on a corner by hand and the gate and the centre group can be
@@ -870,7 +912,6 @@ def _health_bar(model):
     def glyph(i):
         lg = d["logic"][i]
         return "?" if lg is None else ("#" if lg else ".")
-
     def grid(getter):
         """One line per board row, each pad dropped into its own column."""
         lines = []
@@ -995,41 +1036,42 @@ def health_report(by_kind, bad):
     # --------------------------------------------------------------- sensors
     if model.last is not None:
         print("\n  PADS ON THE BOARD   (see PAD_CELL for the geometry)")
-        print("  POLARITY (read off main.c:1960-1967, not assumed): s[i]=1 when")
-        print("  adc <= mid-50 and s[i]=0 when adc >= mid+50, and s=1 is BLACK.")
-        print("  So LOW adc is black, HIGH adc is white -- which means in the")
-        print("  calibration IR_max is the WHITE reading and IR_min the BLACK one.")
+        print("  POLARITY (read off main.c:1960-1967, not assumed): a pad is 1")
+        print("  (BLACK) when adc <= mid-50 and 0 (white) when adc >= mid+50.")
+        print("  Between the two its bit is LATCHED at whatever it was -- so a")
+        print("  reading that never changes can be a pad that is genuinely still,")
+        print("  or one hovering in the dead band the whole time.")
         for line in _health_bar(model):
             print(line)
 
-    print("\n  SENSORS   (now vs mid; `lo`/`hi` are this capture's extremes)")
-    print("    %-5s %-17s %6s %6s %6s %6s %6s  %s"
-          % ("pad", "role", "now", "lo", "hi", "mid", "span", "now reads"))
+    print("\n  SENSORS   (bits, counted over the capture)")
+    print("    `blk`/`wht` are how many samples read black/white, `chg` the")
+    print("    transitions between them and `runB`/`runW` the longest unbroken")
+    print("    stretch of each.  A pad that never shows up in blk was never")
+    print("    tested against the line.")
+    print("    %-5s %-17s %5s %5s %5s %5s %5s %5s %5s  %s"
+          % ("pad", "role", "n", "blk", "wht", "chg", "runB", "runW",
+             "mid", "now reads"))
     for r in model.rows():
         lg = r["logic"]
         mark = "?" if lg is None else ("BLACK" if lg else "white")
-        print("    %-5s %-17s %6s %6s %6s %6s %6s  %s"
-              % (r["name"], r["short"],
-                 "-" if r["now"] is None else r["now"],
-                 "-" if r["lo"] is None else r["lo"],
-                 "-" if r["hi"] is None else r["hi"],
-                 r["mid"] or "-", r["span"], mark))
+        print("    %-5s %-17s %5s %5s %5s %5s %5s %5s %5s  %s"
+              % (r["name"], r["short"], r["n"], r["black"], r["white"],
+                 r["changes"], r["max_run_black"], r["max_run_white"],
+                 r["mid"] or "-", mark))
 
     if model.thr:
-        print("\n  THRESHOLDS   IR_mid / IR_min / IR_max as the build holds them")
-        print("    min is the BLACK end and max is the WHITE end (see the")
-        print("    polarity note above); span is the contrast the calibration saw.")
-        print("    %-5s %6s %6s %6s %6s  %s"
-              % ("pad", "mid", "min=BLK", "max=WHT", "span", "note"))
+        print("\n  THRESHOLDS   IR_mid, as the calibration last set it")
+        print("    IR_min / IR_max are no longer on the wire -- with the H line")
+        print("    carrying bits, the contrast the calibration measured is not")
+        print("    observable here.  The question it used to answer (did this pad")
+        print("    ever see both white and black) is the blk/wht columns above.")
+        print("    %-5s %6s  %s" % ("pad", "mid", "note"))
         for r in model.rows():
             note = ""
-            if not r["cal_hi"]:
-                note = "no calibration -- power-on default"
-            elif r["cal_span"] < 200:
-                note = "narrow window: never saw both white and black"
-            print("    %-5s %6s %6s %6s %6s  %s"
-                  % (r["name"], r["mid"] or "-", r["cal_lo"], r["cal_hi"],
-                     r["cal_span"], note))
+            if r["mid"] == DEFAULT_MID:
+                note = "still the power-on default"
+            print("    %-5s %6s  %s" % (r["name"], r["mid"] or "-", note))
 
     # --------------------------------------------------------------- derived
     d = model.derived()
@@ -1043,11 +1085,10 @@ def health_report(by_kind, bad):
         print("    right   = s[7] && front       -> %s" % tri(d["right"]))
         print("    at_node = s[0] && s[9]        -> %s" % tri(d["at_node"]))
         print("    target  = all of s[1..8]      -> %s" % tri(d["target_row"]))
-        print("    '?' means inside the +/-%d dead band, where s[] is LATCHED and"
-              % BAND)
-        print("    not freshly decided.  These are derived from IR_ADC[] vs")
-        print("    IR_mid[] -- NOT the firmware's own latched s[].  The S/J lines")
-        print("    are the authority on what it actually believed while driving.")
+        print("    These are the bits the firmware SENT, i.e. the ones it decided")
+        print("    against its own IR_mid[] at send time -- not a host-side")
+        print("    re-decision, which is no longer possible: the raw ADC does not")
+        print("    reach this script.  '?' only means no H line was parsed yet.")
 
     # -------------------------------------------------------------- findings
     findings = model.findings()

@@ -160,9 +160,15 @@ drives the brain from a model of the robot, so a wrong model is invisible to it.
 ```bash
 USE_TELEMETRY=1 bash scripts/build_firmware.sh   # the SUPERVISED build
 bash scripts/measure_solver_ram.sh               # the RAM budget, per object
-python scripts/bt_monitor.py                     # LIVE: watch it and check it
+python scripts/bt_monitor.py                     # LIVE: opens COM9 by itself
 python scripts/parse_telemetry.py capture.txt    # offline report, after the run
 ```
+
+**COM9 is the default port** (`DEFAULT_PORT`): pre-selected and opened at
+start-up when a port of that name is enumerated, so bring-up is one command.
+Match is on the **name only** — if the adapter returns as another COM number,
+edit that constant or pass `--port`. Absence is silent; `--replay`/`--demo`
+never open a port. Pairing the link *after* starting is fine: press **Refresh**.
 
 **Watch it live first.** `bt_monitor.py` opens the COM port, draws the brain's
 believed map and position as the data arrives, and — the point of it — feeds the
@@ -333,18 +339,27 @@ a wrong model is invisible to it. M1.5 is the second question.
 ```bash
 USE_HEALTH=1    bash scripts/build_firmware.sh   # BENCH: also defines HEALTH_ONLY
 USE_TELEMETRY=1 bash scripts/build_firmware.sh   # both -- the one to flash to run
-python scripts/bt_monitor.py                     # health panel is automatic
+python scripts/bt_monitor.py                     # both switches follow the capture
+python scripts/bt_monitor.py --health            # or pin them: health cards + pad board
 python scripts/bt_monitor.py --replay cap.txt --headless --health   # exit 1 on FAIL
 ```
+
+**Two independent switches, both `auto` until clicked:** `Canvas: diag | path
+draw` (the picture) and `Cards: health | mission` (the readouts beside it) — so
+the health cards can stay up beside the map. `--health` pins both.
 
 Two lines, sent **only while stopped** (`loop_start == 0 || loop_start >= 7`):
 
 ```
-H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>      20 Hz
-T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max       ~0.35 s, cycling
+H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<b0>,...,<b17>      20 Hz
+T,<ms>,mid,<v0>,...,<v17>                                 ONCE, at calibration
 ```
 
-`H` is 25 fields, `T` is 21. `TLM_DRIVING()` is the single predicate that keeps
+`H` is 25 fields, `T` is 21. `<b*>` is **1 = black, 0 = white**, computed in the
+firmware at send time (`IR_ADC[i] <= IR_mid[i]-500`) because `s[]` is all-zero on
+the bench; the raw ADC is **not** on the wire, and `IR_mid` goes out once, when
+`calibr_ir()` finishes. See BUILD_GUIDE.md for the trade that makes — what it
+loses is the ability to re-derive the bit on the host. `TLM_DRIVING()` is the single predicate that keeps
 the health sender and the mission sender from ever calling `BLT_SendData()` in one
 pass; a queued `J`/`Z` event always wins its slot.
 
@@ -482,9 +497,9 @@ Needs `pip install pyserial` for the serial path only — `--replay` and `--demo
 work without it. Records raw `.txt` + `.csv` + `.json` into `build/bt_captures/`.
 
 Add `--health` for the **bench health view/report** instead of the mission check:
-keys, all 18 raw `IR_ADC[]`, `IR_mid/min/max` and the gyro, drawn in the physical
-bar layout. Exits 1 on any FAIL, **2** if the capture contains no `H` lines (so
-"nothing to check" cannot read as a pass).
+keys, all 18 pad bits, `IR_mid` and the gyro, drawn in the physical bar layout.
+Exits 1 on any FAIL, **2** if the capture contains no `H` lines (so "nothing to
+check" cannot read as a pass).
 
 ### Manual (rarely needed)
 ```powershell
@@ -516,14 +531,15 @@ build/brain_oracle.exe --probe        # print the same steps, unchecked
 - **Sensor branch discovery** in `maze_solver_update_position()` now runs for ALL nodes (not just new ones), creating placeholder neighbor nodes at 20 cm offset for each detected open path.  Back is skipped (the return edge is created when the robot physically drives between nodes).  Heading=NONE defaults to NORTH for the first sensor reading.
 - **The seam is `brain_step()`, not a HAL.** The brain is a pure decision function — `BrainIn` in, one `'F'/'L'/'R'/'B'` out — and the firmware keeps all sensing and all motion. It never reads a sensor, motor, encoder or compass, and it holds no firmware pointer. `maze_hal.h` proposed the opposite (the solver driving the robot through `maze_hal_tick()` while the legacy explorer kept its own map) and is deleted; two integration points for one job meant two RAM budgets. See `inc/brain.h`.
 - **The brain owns the map, the firmware owns the robot.** `maze_hal.h`'s HAL used to declare the firmware's `link[][]` / `node[][]` as `extern` so the solver could read them. Those arrays are gone; nothing in the library reaches into the firmware now.
-- **The health stream carries raw `IR_ADC[]`, never the firmware's `s[]` mask.** On the bench `s[]` is all-zero (the hysteresis block lives in the superloop; the one-shot init runs only after KEY1), so streaming it would publish a *third* derivation rather than the firmware's own value — and a reader would take it for the firmware's opinion. The app derives the bit from `adc` vs `mid` and labels it derived; the `S`/`J` lines stay the authority on what the firmware believed.
+- **The health stream carries one bit per pad (`IR_ADC[i] <= IR_mid[i]-500`) and `IR_mid` ONCE, at calibration — never the raw `IR_ADC[]`, and never the firmware's `s[]` mask.** On the bench `s[]` is all-zero (the hysteresis block lives in the superloop; the one-shot init runs only after KEY1), so streaming it would publish a *third* derivation rather than the firmware's own value — and a reader would take it for the firmware's opinion. The bit is therefore computed at send time, and the `S`/`J` lines stay the authority on what the firmware believed while driving. The cost is stated and accepted: the host can no longer re-derive the bit, so the checks that needed the magnitude of a reading are gone (see BUILD_GUIDE.md). Changing this back is a RAM/bandwidth decision plus a rewrite of the fixtures — ask first.
 - **No float `printf` in the firmware, ever** — one `%.1f` pulls 1-2 KB of the 64 KB flash for the float formatter. Scaled integers on the wire (×10 for deg/s and deg), divided once at parse time. This is why the health stream's gyro fields are integers.
-- **One `BLT_SendData()` per superloop pass.** The call restarts the TX DMA, so a second one before the first drains truncates the first — silently. This is why the health lines are short, why `T` is three ~106-byte lines rather than one 290-byte line, and why the health sender is gated on `!TLM_EVENT_PENDING()` so a queued `J`/`Z` always wins its slot. It is also why `health_mute_until` stands the stream off for 40 ms after `calibr_ir()` prints its own `IR_mid` dump.
+- **One `BLT_SendData()` per superloop pass.** The call restarts the TX DMA, so a second one before the first drains truncates the first — silently. This is why the health lines are short, why `T` is one ~106-byte line (it was three when it cycled mid/min/max) and why the health sender is gated on `!TLM_EVENT_PENDING()` so a queued `J`/`Z` always wins its slot. It is also why `health_mute_until` stands the stream off for 40 ms after `calibr_ir()` sends its `T` line.
 - **`HEALTH_ONLY`'s boot loop uses a `static volatile _Bool bench_leave`, not a bare `for(;;)`.** With a provably-infinite loop ARMCC emits `#128-D: loop is not reachable`, everything after the loop is eliminated, and flash silently drops from ~41.5 KB to 39492 B because the whole mission got thrown away — the warning was the only sign. A `#pragma` would hide the fact that the code after the loop is still wanted; a volatile the compiler cannot fold keeps it alive *and* keeps the zero-warning rule. Do not "simplify" this to `for(;;)`.
 - **The app's TERMINAL is an event log, never a raw dump of the wire.** At 20 lines/s the health stream would push the `Hi ,mmdi` banner — the one line that can be a *reply*, and so the only proof the link works both ways — off the top within a second. `H`/`S` are therefore filtered out of it and drawn in the bar/panel instead. `_log_line()` matches on `Pipeline.feed`'s tag, not `parse_line`'s verdict, because a non-record line is re-tagged on the way through (the banner arrives as `CHATTER`).
 - **`parse_telemetry.PAD_CELL` is the ONE definition of the sensor geometry — a grid cell per pad — and both the canvas and the text report are drawn from it.** Do not add a second layout, and do not go back to "rows": the pads are a **ring** (`S0`/`S9` on the rotation axis at the robot's centre, `S1`/`S8` set back behind the front row, the rear bank running `S17…S10`), and any row-shaped model puts `S0`, `S1`, `S8`, `S9`, `S10` or `S17` in the wrong place. The grid is **portrait** (`BOARD_ROWS`/`BOARD_COLS` = 29/17 = 1.71, the board's own 570/335) — the drawn rectangle has to have the robot's shape, so a wide grid is a bug, not a style. `TARGET_ROW`/`REAR_TARGET_ROW` stay in index order and are unaffected — the target test is order-blind. Read `PAD_CELL`'s comment before changing any of it.
-- **The health canvas carries no words of its own beyond each pad's name and ADC.** The derived summary, the role words, `loop_start` and the "a green strip is not a verdict" caveat all live on the right-hand cards (`DERIVED`, `HEALTH`, `STATE`), and they were removed from under the board once they were shown to be duplicating them — a picture with a page of footnotes under it is a picture nobody reads. Do not add a caption back to the canvas: put it on a card.
-- **The right panel scrolls, and the THRESHOLDS table scrolls inside it.** The column of cards requests ~780 px against the ~580 the 800 px window leaves it (toolbar 39 + TERMINAL 148), and the card that falls off the bottom is CHECKS — the verdict. So the cards are on a scrolling canvas, and the 19-row thresholds table has its own scrollbar with a fixed 10-line height rather than growing. `_panel_wheel` routes the wheel by what is under the pointer (a `Text` scrolls itself; anything else inside the right panel scrolls the panel); it is explicit because Tk's own Text binding would scroll the table *and* the panel under it on one notch. Any card fed from the 30 ms tick must use `_set_scroll_text`, which rewrites only on a real change and carries the scroll position over — re-inserting identical text every frame fights the operator's scrollbar.
+- **Per pad, the readout shows exactly two things: the bit, and `IR_mid`.** On the canvas: the pad's name and its bit (`0`/`1`). On the PADS card: `pad  IR_mid  bit`, two columns, **no word/note column** — a prose column beside 18 sensors made the table unreadable and every verdict it carried is on CHECKS already. Nothing else goes next to a sensor: not the raw ADC (what was under the pad before the 2026-09-24 format change), not a hold count, not a sample count. The wire sends 0/1 per sensor plus `IR_mid` once, and the readout shows the same two numbers — asked for, and corrected twice.
+- **The health canvas carries no words of its own beyond each pad's name and bit.** The derived summary, the role words, `loop_start` and the "a green strip is not a verdict" caveat all live on the right-hand cards (`DERIVED`, `HEALTH`, `STATE`), and they were removed from under the board once they were shown to be duplicating them — a picture with a page of footnotes under it is a picture nobody reads. Do not add a caption back to the canvas: put it on a card.
+- **The right panel scrolls, and the PADS table scrolls inside it.** The column of cards requests ~780 px against the ~580 the 800 px window leaves it (toolbar 39 + TERMINAL 148), and the card that falls off the bottom is CHECKS — the verdict. So the cards are on a scrolling canvas, and the 19-row pad table has its own scrollbar with a fixed 10-line height rather than growing. `_panel_wheel` routes the wheel by what is under the pointer (a `Text` scrolls itself; anything else inside the right panel scrolls the panel); it is explicit because Tk's own Text binding would scroll the table *and* the panel under it on one notch. Any card fed from the 30 ms tick must use `_set_scroll_text`, which rewrites only on a real change and carries the scroll position over — re-inserting identical text every frame fights the operator's scrollbar.
 
 ## Key reference files
 

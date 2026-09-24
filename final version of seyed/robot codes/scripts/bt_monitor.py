@@ -66,11 +66,17 @@ this makes.  Note that the firmware's `Hi ,mmdi` boot banner appears on every
 real capture and is BANNER (benign), not UNPARSED (the alarm).
 
 Usage:
-  python scripts/bt_monitor.py                      # GUI, pick a port
-  python scripts/bt_monitor.py --port COM7          # GUI, connect at once
+  python scripts/bt_monitor.py                      # GUI, opens COM9 if it is there
+  python scripts/bt_monitor.py --port COM7          # GUI, connect at once to another
   python scripts/bt_monitor.py --replay cap.txt     # GUI, replay a capture
   python scripts/bt_monitor.py --replay cap.txt --headless
   python scripts/bt_monitor.py --demo               # GUI smoke test, no hardware
+
+COM9 is this bench's adapter (`DEFAULT_PORT`): it is pre-selected, and opened at
+start-up, whenever a port named COM9 is enumerated, so a bring-up does not begin
+with a dropdown.  The match is on the name only -- see that constant -- and the
+guard is against absence: no COM9 enumerated means nothing is selected, nothing
+is opened, and the picker behaves exactly as it did before.
 
 Needs `pip install pyserial` (the repo's only third-party dependency) for live
 capture.  --replay, --demo and --headless need nothing but the stdlib.
@@ -95,6 +101,15 @@ ROBOT_CODES = os.path.dirname(HERE)
 DEFAULT_ORACLE = os.path.join(ROBOT_CODES, "build", "brain_oracle.exe")
 FIXTURES = os.path.join(ROBOT_CODES, "test", "fixtures")
 CAPTURE_DIR = os.path.join(ROBOT_CODES, "build", "bt_captures")
+
+# The bench adapter.  Windows hands out COM numbers per adapter, and this one is
+# COM9 on this machine -- so the monitor can open the robot's link itself instead
+# of making the operator pick the same entry out of a dropdown on every bring-up.
+# The name is matched; the DEVICE is not identified (no USB VID/PID or
+# description test), so this is a one-machine convenience rather than a claim
+# about what COM9 is.  The only thing guarded is absence: no COM9 enumerated
+# means nothing is pre-selected and nothing is opened.  See `_preferred_port`.
+DEFAULT_PORT = "COM9"
 
 sys.path.insert(0, HERE)
 import parse_telemetry as pt                    # noqa: E402  (path set above)
@@ -155,6 +170,12 @@ FONT_BOLD = ("Segoe UI", 10, "bold")
 FONT_MONO = ("Consolas", 10)
 
 PHASE_NAME = {0: "EXPLORE", 1: "RETURN_HOME", 2: "FAST_RUN", 3: "DONE"}
+
+# The canvas switch's two settings, spelled for the button.  The internal names
+# are short because they are what `_draw` branches on; the labels are what the
+# operator reads, and `path draw` is the one that needs saying (a bare "path"
+# reads like a file path on a row that also has a port picker).
+CANVAS_NAME = {"diag": "diag", "path": "path draw"}
 
 # The one byte the app ever says to the robot.  Value is arbitrary: the firmware's
 # USART1 IRQ flags ANY received byte under USE_MAZE_HEALTH, so the payload only
@@ -536,24 +557,27 @@ CSV_COLUMNS = [
     # Appended, never interleaved: a capture CSV is read by column NAME, so
     # adding at the end cannot shift a column an existing reader relies on.
     # The health build's own two lines land here.
-    "keys", "loop", "adc", "what", "val",
+    "keys", "loop", "bits", "what", "val",
 ]
 
 
 def health_row(kind, rec):
     """One CSV row's worth of kwargs for an H or T line.
 
-    The eighteen channels go in as ONE semicolon-joined field rather than as
-    eighteen columns: the mission columns are irrelevant to a health build, and
-    duplicating the table for two line types that never appear together would
-    make both harder to read.  Semicolons, not commas, so the CSV stays one row
-    per wire line and a naive split on ',' still gives sane columns.
+    The eighteen channels go in as ONE field rather than as eighteen columns:
+    the mission columns are irrelevant to a health build, and duplicating the
+    table for two line types that never appear together would make both harder
+    to read.  Semicolons, not commas, so the CSV stays one row per wire line and
+    a naive split on ',' still gives sane columns.
+
+    `bits` carries 0/1 per pad, as the firmware sent them; the T line's `val` is
+    the one time IR_mid itself is on the wire.
     """
     if kind == "H":
         return {"type": "H", "robot_ms": rec["ms"], "keys": "%X" % rec["keys"],
                 "loop": rec["loop"], "head": rec["head"], "gz": rec["gz"],
                 "za": rec["za"],
-                "adc": ";".join(str(v) for v in rec["adc"])}
+                "bits": ";".join(str(v) for v in rec["bits"])}
     return {"type": "T", "robot_ms": rec["ms"], "what": rec["what"],
             "val": ";".join(str(v) for v in rec["val"])}
 
@@ -920,6 +944,7 @@ class MonitorApp:
         self.replay_i = 0
         self.last_j = None
         self.last_s = None
+        self._port_manual = False   # set once the operator picks a port by hand
         self._thr_sig = {}      # last-seen T values, so only CHANGES are logged
         self._prev_keys = None  # last key bitmask, so only EDGES are logged
 
@@ -933,7 +958,12 @@ class MonitorApp:
             self.playing = True
         self.refresh_ports()
         if args.port:
+            # An explicit --port is an instruction, not a preference: open it
+            # even if enumeration did not see it, and fail loudly if it will not
+            # open.  It also wins over the COM9 default.
             self.connect(port_device(args.port))
+        else:
+            self._autoconnect()
         self.root.after(30, self._tick)
 
     # -------------------------------------------------------------- UI build
@@ -954,6 +984,7 @@ class MonitorApp:
         self.port_box = ttk.Combobox(bar, textvariable=self.port_var, width=36,
                                      state="readonly")
         self.port_box.pack(side="left", pady=8)
+        self.port_box.bind("<<ComboboxSelected>>", self._port_picked)
         tk.Button(bar, text="Refresh", command=self.refresh_ports, bg=CARD_BG,
                   fg=FG, font=FONT, relief="flat").pack(side="left", padx=4)
         tk.Label(bar, text="Baud", bg=PANEL_BG, fg=FG_MUTED,
@@ -970,13 +1001,26 @@ class MonitorApp:
         tk.Checkbutton(bar, text="Record", variable=self.rec_var, bg=PANEL_BG,
                        fg=FG, selectcolor=CARD_BG, activebackground=PANEL_BG,
                        activeforeground=FG, font=FONT).pack(side="left", padx=6)
-        self.btn_view = tk.Button(bar, text="View: mission", command=self._toggle_view,
-                                  bg=CARD_BG, fg=FG, font=FONT, relief="flat",
-                                  width=16)
-        self.btn_view.pack(side="left", padx=6)
+        # TWO SWITCHES, INDEPENDENT.  CANVAS is WHAT IS DRAWN (the pad board vs
+        # the believed map and trail); CARDS is WHICH COLUMN OF READOUTS sits
+        # beside it (the mission cards vs the bench health cards).  They used to
+        # be one button, which meant wanting the health cards up while watching
+        # where the robot thinks it is -- the normal thing to want on the bench
+        # -- was impossible.  See set_canvas/set_cards.
+        self.btn_canvas = tk.Button(bar, text="Canvas: path draw",
+                                    command=self._toggle_canvas, bg=CARD_BG,
+                                    fg=FG, font=FONT, relief="flat", width=16)
+        self.btn_canvas.pack(side="left", padx=6)
+        self.btn_cards = tk.Button(bar, text="Cards: mission",
+                                   command=self._toggle_cards, bg=CARD_BG,
+                                   fg=FG, font=FONT, relief="flat", width=16)
+        self.btn_cards.pack(side="left", padx=6)
+        # Packed from the RIGHT so the second button cannot squeeze the link
+        # status off the bar on a narrow window -- "link error: ..." is the most
+        # valuable thing on this row and it is the one pack would clip first.
         self.lbl_conn = tk.Label(bar, text="not connected", bg=PANEL_BG,
                                  fg=FG_MUTED, font=FONT)
-        self.lbl_conn.pack(side="left", padx=10)
+        self.lbl_conn.pack(side="right", padx=10)
 
         # ---- THE TERMINAL.  Deliberately an EVENT log, not a raw dump of the
         # wire: the health stream runs at 20 lines a second, so a true raw
@@ -1011,7 +1055,9 @@ class MonitorApp:
         self.term.tag_configure("warn", foreground=WARN_COLOR)
         self.term.tag_configure("muted", foreground=FG_MUTED)
         self.term.configure(state="disabled")
-        self._log("bt_monitor started.  Connect, then the probe byte asks the "
+        self._log("bt_monitor started.  %s opens by itself when the adapter is "
+                  "there." % DEFAULT_PORT, "muted")
+        self._log("Otherwise pick a port and Connect -- the probe byte asks the "
                   "robot to identify itself.", "muted")
 
         body = tk.Frame(self.root, bg=BG)
@@ -1060,8 +1106,13 @@ class MonitorApp:
         self.health_panel = tk.Frame(holder, bg=PANEL_BG)
         self._build_mission_panel(tk)
         self._build_health_panel(tk)
-        self.set_view("health" if self.args.health else "mission", auto=not
-                      self.args.health)
+        # `--health` is the operator already saying which build this is, so it
+        # pins BOTH switches and switches the auto-follow off.  Without it both
+        # start their benign default and follow the first telemetry line.
+        self.set_cards("health" if self.args.health else "mission", auto=not
+                       self.args.health)
+        self.set_canvas("diag" if self.args.health else "path", auto=not
+                        self.args.health)
 
     def _build_mission_panel(self, tk):
         self.status_labels = {}
@@ -1124,13 +1175,13 @@ class MonitorApp:
         self.key_log.pack(fill="x", padx=6, pady=2)
 
         self.derived_text = self._text_card(self.health_panel,
-                                            "DERIVED  (from ADC vs IR_mid)",
+                                            "DERIVED  (the firmware's own bits)",
                                             FG, tk, mono=("Consolas", 10))
         self.gyro_text = self._text_card(self.health_panel, "GYRO", FG, tk)
         self.thr_text = self._scroll_card(self.health_panel,
-                                          "THRESHOLDS  (T lines -- scroll for "
-                                          "all 18)", FG_MUTED, tk,
-                                          mono=("Consolas", 9))
+                                          "PADS  (IR_mid from the T line, and "
+                                          "the bit each one sent)",
+                                          FG_MUTED, tk, mono=("Consolas", 9))
 
         # CHECKS is the one card whose contents change shape, so its widgets are
         # rebuilt only when the finding list actually changes -- colour-coding
@@ -1141,44 +1192,69 @@ class MonitorApp:
         self.checks_card.pack(fill="x", padx=8, pady=(0, 4))
         self._checks_sig = None
 
-    def set_view(self, view, auto=False):
-        self.view = view
-        self.view_auto = auto
-        self.mission_panel.pack_forget()
-        self.health_panel.pack_forget()
-        (self.health_panel if view == "health"
-         else self.mission_panel).pack(fill="both", expand=True)
-        self.btn_view.configure(text="View: %s%s"
-                                % (view, " (auto)" if auto else ""))
+    def set_canvas(self, mode, auto=False):
+        """Which picture the canvas draws: "diag" (the 18-pad board) or "path"
+        (the believed map, the trail and the robot's heading)."""
+        self.canvas_mode = mode
+        self.canvas_auto = auto
+        self.btn_canvas.configure(text="Canvas: %s%s"
+                                  % (CANVAS_NAME[mode], " (auto)" if auto else ""))
 
-    def _toggle_view(self):
+    def _toggle_canvas(self):
         # An explicit click means the operator has decided; stop second-guessing
         # them on the next line that arrives.
-        self.set_view("mission" if self.view == "health" else "health",
-                      auto=False)
+        self.set_canvas("path" if self.canvas_mode == "diag" else "diag",
+                        auto=False)
+
+    def set_cards(self, cards, auto=False):
+        """Which column of cards is beside the canvas: the mission readouts or
+        the bench health readouts.  Named `cards` rather than `view` because it
+        stopped meaning "the view" the moment the canvas got its own switch."""
+        self.card_view = cards
+        self.card_auto = auto
+        self.mission_panel.pack_forget()
+        self.health_panel.pack_forget()
+        (self.health_panel if cards == "health"
+         else self.mission_panel).pack(fill="both", expand=True)
+        self.btn_cards.configure(text="Cards: %s%s"
+                                 % (cards, " (auto)" if auto else ""))
+
+    def _toggle_cards(self):
+        self.set_cards("mission" if self.card_view == "health" else "health",
+                       auto=False)
+
+    # Which build this capture is, said in the two switches' own vocabularies.
+    # H/T lines only exist in a health build, J/S/B/Z only while driving, so
+    # they name both the useful card column and the useful picture.
+    AUTO_VIEW = {"H": "health", "T": "health",
+                 "J": "mission", "S": "mission", "B": "mission", "Z": "mission"}
+    AUTO_CANVAS = {"health": "diag", "mission": "path"}
 
     def _auto_view(self, kind):
-        """Follow the build, until the operator says otherwise.
+        """Follow the build, until the operator says otherwise -- per switch.
 
-        A capture is one build or the other: H lines only exist in a health
-        build, J lines only while driving.  So the first real line tells us
-        which panel is useful, and guessing wrong costs nothing but a click.
+        A capture is one build or the other, so the first real line tells us
+        which cards and which picture are useful, and guessing wrong costs
+        nothing but a click.
 
-        Only telemetry moves the view.  The `Hi ,mmdi` boot banner arrives
+        Only telemetry moves either switch.  The `Hi ,mmdi` boot banner arrives
         FIRST on every real capture, health or not, so switching on anything
         that parses would make a health capture flash the mission panel before
         settling -- a flicker that reads as a bug.
+
+        The two switches follow INDEPENDENTLY: clicking one stops its own auto
+        follow and leaves the other still tracking, so an operator who pins the
+        canvas to `path draw` on a health capture keeps the pad board off the
+        canvas from then on but still gets the health cards as they arrive.
         """
-        if not self.view_auto:
+        want = self.AUTO_VIEW.get(kind)
+        if want is None:
             return
-        if kind in ("H", "T"):
-            want = "health"
-        elif kind in ("J", "S", "B", "Z"):
-            want = "mission"
-        else:
-            return
-        if want != self.view:
-            self.set_view(want, auto=True)
+        if self.card_auto and want != self.card_view:
+            self.set_cards(want, auto=True)
+        canvas = self.AUTO_CANVAS[want]
+        if self.canvas_auto and canvas != self.canvas_mode:
+            self.set_canvas(canvas, auto=True)
 
     def _card(self, parent, title, tk):
         tk.Label(parent, text=title, bg=PANEL_BG, fg=ACCENT, font=FONT_BOLD,
@@ -1310,11 +1386,53 @@ class MonitorApp:
     # ------------------------------------------------------------- connection
     def refresh_ports(self):
         ports = list_ports()
-        if not HAVE_SERIAL:
-            ports = ["(pyserial not installed -- pip install pyserial)"]
-        self.port_box["values"] = ports or ["(no ports found)"]
-        if ports and not self.port_var.get():
-            self.port_var.set(ports[0])
+        self.port_box["values"] = (
+            ports or ["(no ports found)"] if HAVE_SERIAL
+            else ["(pyserial not installed -- pip install pyserial)"])
+        if not ports:
+            return
+        # The preference is re-applied on EVERY refresh, not just the first one.
+        # Windows only creates the Bluetooth SPP port once the link is paired --
+        # which is usually AFTER this app was started -- so Refresh is the moment
+        # the bench port appears and the selection has to move onto it.  A port
+        # the operator picked by hand outranks the preference and is never
+        # stolen back; see _port_picked.
+        if not self._port_manual:
+            self.port_var.set(self._preferred_port(ports))
+
+    def _port_picked(self, _event=None):
+        """The operator chose a port by hand, so Refresh leaves it alone from now
+        on -- including if they chose a different one than `DEFAULT_PORT`."""
+        self._port_manual = True
+
+    def _preferred_port(self, ports):
+        """`DEFAULT_PORT` if a port by that name is enumerated, else the first.
+
+        Matched against the ENUMERATED labels rather than trusted as a constant,
+        so an unplugged adapter is never pre-selected.  The match is on the port
+        NAME only: a different device that happens to be COM9 is selected -- and
+        auto-connected, see `_autoconnect` -- exactly as if it were the adapter.
+        That is the accepted trade for a no-click bring-up; identifying the
+        adapter proper would take a VID/PID test, and this file has no business
+        knowing which USB chip is on the bench."""
+        for label in ports:
+            if port_device(label).upper() == DEFAULT_PORT:
+                return label
+        return ports[0]
+
+    def _autoconnect(self):
+        """Open the bench port at start-up -- the no-click bring-up.
+
+        Silent, not an error, when the adapter is not there: the GUI is also
+        started to read a capture or to look at a past one, and a red
+        `open failed` on a monitor that was never going to see a robot is noise.
+        Not attempted on --replay/--demo at all, where there is no robot and
+        opening a COM port would be opening a device for no reason."""
+        if self.args.replay or self.args.demo:
+            return
+        if (self.port_var.get()
+                and port_device(self.port_var.get()).upper() == DEFAULT_PORT):
+            self.connect(DEFAULT_PORT)
 
     def _toggle(self):
         if self.source:
@@ -1421,8 +1539,7 @@ class MonitorApp:
         if kind == "CHATTER":
             # Three things land here, and they are worth telling apart: the
             # `Hi ,mmdi` handshake (the whole point of the pane -- green), the
-            # KEY2 calibration's IR_mid dump (the evidence that the calibration
-            # did something), and the boot banner at power-on.
+            # boot banner at power-on, and any T line that failed to parse.
             text = line.strip()
             if not text:
                 return
@@ -1488,7 +1605,10 @@ class MonitorApp:
         return ox + x * scale, oy - y * scale
 
     def _draw(self):
-        if self.view == "health":
+        # The canvas mode says WHAT is drawn; which cards are up is set_cards's
+        # business and does not reach this function.  That is the whole point of
+        # the split -- the health cards can sit beside the map and trail.
+        if self.canvas_mode == "diag":
             self._draw_health()
             return
         tk = self.tk
@@ -1598,10 +1718,11 @@ class MonitorApp:
     #
     # WHAT IT IS NOT.  The roles drawn here are SENSORS.md's, and a pad that
     # tracks white and black perfectly can still be the WRONG pad.  Confirming
-    # that needs the robot on the field.  The colour is derived from IR_ADC[]
-    # vs IR_mid[], not from the firmware's latched s[], so it says what the
-    # firmware WOULD decide, not what it decided -- the S/J lines are the
-    # authority on that.
+    # that needs the robot on the field.  The colour is the bit the firmware
+    # itself decided when it sent the line (`IR_ADC[i] <= IR_mid[i]-500`, see
+    # main.c's health_send), not a host-side opinion about a raw reading -- the
+    # raw reading is not on the wire any more.  The S/J lines remain the
+    # authority on what it believed while driving.
     # THE KEY to the strips under the pads.  Nothing on the canvas spells these
     # out any more: the strip colour IS the role, and this tuple is the order
     # they are drawn in -- the same four roles, and the same colours, as the
@@ -1621,7 +1742,6 @@ class MonitorApp:
             return
 
         d = model.derived()
-        adc = model.last["adc"]
 
         # THE BOARD, drawn as a board: long and narrow, front at the top, every
         # pad at its pt.PAD_CELL position.  Read that table's comment for the
@@ -1644,7 +1764,7 @@ class MonitorApp:
         # rotation axis IS the board's centre line, and that line is drawn.
         axis_x = x0 + pt.BOARD_COLS / 2.0 * cell
         # The pads are a bit larger than their cell -- the one schematic liberty
-        # taken in this drawing, so the name and the ADC both fit inside.  They
+        # taken in this drawing, so the name and the bit both fit inside.  They
         # are sized from the cell rather than fixed, so they grow with the pane
         # and never collide: the closest two pads are two cells apart, and 1.6
         # cells of pad leaves a visible gap between them.
@@ -1690,8 +1810,13 @@ class MonitorApp:
             c.create_text((x1 + x2) / 2.0, y1 + ph * 0.28,
                           text=pt.sensor_name(i), fill=tcol,
                           font=("Consolas", 7, "bold"))
-            c.create_text((x1 + x2) / 2.0, y1 + ph * 0.72, text=str(adc[i]),
-                          fill=tcol, font=("Consolas", 7))
+            # THE BIT ITSELF, 0 or 1 -- the same number the robot sent, so the
+            # board and the wire cannot be read two ways.  A pad shows 1 when it
+            # is over black.  (This spot used to hold a raw ADC count; do not put
+            # another number here -- 0/1 per sensor is the whole point.)
+            c.create_text((x1 + x2) / 2.0, y1 + ph * 0.72,
+                          text="?" if lg is None else str(lg),
+                          fill=tcol, font=("Consolas", 7, "bold"))
             # A strip under each pad carries its ROLE.  Drawn as a strip rather
             # than as a box around the pad so two overlapping roles (the centre
             # group is also inside the target U) do not fight for the outline.
@@ -1758,7 +1883,8 @@ class MonitorApp:
         if d:
             self.derived_text.configure(
                 text="F%s  L%s  R%s   at_node=%s  target=%s\n"
-                     "derived from ADC vs IR_mid, not the firmware's s[]"
+                     "built from the bits the firmware sent, so this IS its\n"
+                     "answer -- the S/J lines are the authority while driving"
                      % (tri(d["front"]), tri(d["left"]), tri(d["right"]),
                         tri(d["at_node"]), tri(d["target_row"])),
                 fg=FG)
@@ -1771,17 +1897,26 @@ class MonitorApp:
                     ">> A BIAS, NOT MOTION -- press KEY3 to calibrate"),
             fg=FG if gyro_ok else WARN_COLOR)
 
-        if model.thr:
-            rows = ["  pad   mid  min=BLK max=WHT  span"]
+        # TWO COLUMNS PER PAD, and no prose: the threshold the bit was decided
+        # against, then the bit.  `IR_mid` is per-PAD on purpose -- it comes from
+        # the T line the calibration sends once, and it is the only other number
+        # the robot puts on the wire, so it belongs beside the pad it belongs to.
+        # There is deliberately no `note` column: a word column next to a sensor
+        # made the table unreadable, and every verdict it could have carried is
+        # already spelled out on the CHECKS card below.
+        if model.h:
+            known = "mid" in model.thr
+            rows = ["  pad     IR_mid   bit"]
             for r in model.rows():
-                rows.append("  %-5s %5d %7d %7d %5d"
-                            % (r["name"], r["mid"], r["cal_lo"], r["cal_hi"],
-                               r["cal_span"]))
-            self._set_scroll_text(self.thr_text, "\n".join(rows), FG_MUTED)
+                rows.append("  %-5s %s   %s"
+                            % (r["name"],
+                               ("%6d" % r["mid"]) if known else "     -",
+                               r["now"]))
+            self._set_scroll_text(self.thr_text, "\n".join(rows),
+                                  FG_MUTED if known else WARN_COLOR)
         else:
             self._set_scroll_text(self.thr_text,
-                                  "no T line yet -- thresholds unknown,\n"
-                                  "so nothing can be compared against them",
+                                  "no H line yet -- no pad bits",
                                   WARN_COLOR)
 
         findings = model.findings()
@@ -1802,7 +1937,7 @@ class MonitorApp:
                                   fill="x", padx=4, pady=1)
 
     def _update_panels(self):
-        if self.view == "health":
+        if self.card_view == "health":
             self._update_health_panel()
             return
         m = self.pipe.mission
@@ -1886,7 +2021,9 @@ def run_gui(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--port", help="COM port to open (skips the picker)")
+    ap.add_argument("--port", help="COM port to open (skips the picker; default: "
+                                   "%s, opened at start-up when present)"
+                                   % DEFAULT_PORT)
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--replay", help="replay a captured text file, no hardware")
     ap.add_argument("--demo", action="store_true",

@@ -359,8 +359,8 @@ python scripts/parse_telemetry.py capture.txt   # or the offline report
 Two line types, sent only while stopped:
 
 ```
-H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<a0>,...,<a17>        20 Hz
-T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max         ~0.35 s, cycling
+H,<ms>,<keys>,<loop>,<head>,<gz>,<za>,<b0>,...,<b17>        20 Hz
+T,<ms>,mid,<v0>,...,<v17>                        ONCE, at calibration
 ```
 
 | Field | Meaning |
@@ -368,9 +368,10 @@ T,<ms>,<what>,<v0>,...,<v17>       what=mid|min|max         ~0.35 s, cycling
 | `<keys>` | hex bitmask, live: **1=KEY1** (PB5), **2=KEY2** (PC15), **4=KEY3** (PC14) |
 | `<loop>` | `loop_start`, so the app knows which state the robot is in. Named by `parse_telemetry.LOOP_STATES` (0 = BOOT/BENCH, 1 = EXPLORE, … 8 = DONE) and shown on the health panel's STATE card. **In the bench build this is 0 and stays 0** — anything else means the mission started, i.e. `HEALTH_ONLY` did not take |
 | `<head>` | which bank leads; 0 = the front row, which is the one on the bench |
-| `<gz>` | `Gyro_Z` in **deg/s ×10**, as an integer |
-| `<za>` | `Z_Angle` in **deg ×10**, as an integer |
-| `a0..a17` | raw `IR_ADC[]` — the ground truth, unfiltered and unconverted |
+| `<gz>` | `Gyro_Z` in **deg/s ×10**, as an integer — **scaled at the send site** by `ANGULAR_RATE_SENSITIVITY_2000DPS`, because `Gyro_Z` itself is raw LSB (0.070 dps/LSB) |
+| `<za>` | `Z_Angle` in **deg ×10**, as an integer — no scale needed, it is already degrees |
+| `b0..b17` | **1 = pad over BLACK, 0 = white** — computed in the firmware at send time |
+| `<v0..v17>` | `IR_mid[]`, sent **once** (see below) |
 
 `H` is **25 fields** (tag + 6 scalars + 18 channels) and `T` is **21** (tag + ms +
 `what` + 18). Both counts are asserted by `parse_telemetry.py`; a mismatch is
@@ -381,17 +382,31 @@ reported as a BAD line rather than guessed at.
 buys 0.1° resolution for free, and the parser divides by 10 once, at parse time,
 so no consumer has to remember to.
 
-`T` carries `IR_mid[]`, `IR_min[]` and `IR_max[]` — the calibration evidence —
-cycling one of the three per slot. It is three ~106-byte lines rather than one
-290-byte line because `BLT_SendData()` restarts the TX DMA: a long line is a long
-window in which a junction event would truncate it.
+**The bits, not the raw `IR_ADC[]`.** 18 numbers of 3-4 digits per line was ~40
+bytes of the 20 Hz stream spent on values nothing reads. What the bench wants is
+which pads are over black, and the firmware has the answer already: the H line
+carries `b[i] = (IR_ADC[i] <= IR_mid[i] - 500)`, its own entry-into-black test.
+The trade is stated plainly because it is real: **the line carries the decision,
+not the evidence for it**, so the app can no longer re-derive the bit its own
+way and compare. What survives is every fault that shows as a pad *not
+behaving* (stuck black, stuck white, never tested); what is gone is anything
+needing the magnitude of a reading — including the old "every channel reads 0,
+so the emitters are unpowered" FAIL, which is now an INFO naming the one-second
+test that separates a dead emitter bar from a robot parked on white field.
 
 **Deliberately not sent: the `s[]` mask.** On the bench `s[]` is still all-zero —
 the hysteresis block that fills it lives in the superloop and the one-shot init
-runs only after KEY1 — so a mask here would be a fresh third derivation rather
-than the firmware's own value. The app derives the logical bit from `adc[i]` vs
-`mid[i]` itself and labels it as derived; the `S`/`J` lines stay the authority on
-what the *firmware* believed.
+runs only after KEY1 — so a mask here would publish a *third* derivation rather
+than the firmware's own value. The bit above is computed at send time instead;
+the `S`/`J` lines stay the authority on what the *firmware* believed.
+
+**Why `T` is sent once.** A threshold only changes when a calibration writes it,
+so `T` goes out the moment `calibr_ir()` finishes and never otherwise. The old
+scheme cycled mid/min/max through the stream forever — a third of the bench
+bandwidth restating a number that had not moved — and with the raw ADC gone
+there is nothing left for min/max to be compared against. One line also keeps
+well inside the `BLT_SendData()` DMA restart window (`Hardware.c:135`); `min`/`max`
+are still *accepted* by the parser for old captures, but no build sends them.
 
 | Build | Flash | RAM |
 |---|---|---|
