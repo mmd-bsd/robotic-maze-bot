@@ -47,6 +47,51 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* ============================== BUILD SWITCHES ==============================
+   THE ONLY PLACE THESE ARE SET.  Edit the 0/1 below and rebuild.
+
+   There are no -D flags for these any more: build_firmware.sh does not pass
+   them and main.c's "Define:" box in Source.uvprojx is empty, so the IDE and
+   the command line cannot disagree about which firmware you built, and nothing
+   can override what you set here.  Only this file reads them.
+
+      0 = off -- the code is not compiled, and costs neither flash nor RAM
+      1 = on
+
+   They are compile-time rather than a runtime mode variable on purpose: each
+   one removes whole functions, and this is an 8 KB part with no RAM to spare
+   for a mode flag nor a branch in the hot path for a decision that is only
+   ever made on the bench.  The cost of each, all three off unless said
+   otherwise, measured 2026-09-24 (BUILD_GUIDE.md has the current figures):
+
+     USE_MAZE_TELEMETRY   S/J/Z/B lines while DRIVING, plus the 5 s pause at
+                          every junction.  ~2 KB flash, ~80 B RAM.  This is what
+                          makes the build SUPERVISED -- it is the one to flash
+                          for an actual run (bt_monitor.py / parse_telemetry.py
+                          read it).
+     USE_MAZE_HEALTH      H/T lines while STOPPED: the three keys, all 18 raw IR
+                          pads and the gyro.  ~1.5 KB flash, ~16 B RAM.  Covers
+                          the bench, and the stopped states after a run.
+     HEALTH_ONLY          BENCH: the pre-KEY1 loop never exits, so the robot
+                          CANNOT start a mission whatever is pressed.  KEY2 =
+                          IR calibration, KEY3 = gyro, KEY1 = re-send the
+                          banner.  Needs USE_MAZE_HEALTH (enforced below).
+
+   Two combinations are worth remembering, and they are the two the docs talk
+   about: a supervised run is TELEMETRY 1 / HEALTH 1 / HEALTH_ONLY 0, and the
+   bench is TELEMETRY 0 / HEALTH 1 / HEALTH_ONLY 1.  Telemetry does not imply
+   HEALTH_ONLY: the bring-up build has to be able to drive. */
+#define USE_MAZE_TELEMETRY  0
+#define USE_MAZE_HEALTH     0
+#define HEALTH_ONLY         0
+
+/* A bench build with the stream off would loop forever saying nothing -- a
+   brick with no symptoms, which is the one failure you cannot diagnose from
+   the robot's side.  Catch that combination here rather than on the field. */
+#if HEALTH_ONLY && !USE_MAZE_HEALTH
+#error "HEALTH_ONLY=1 needs USE_MAZE_HEALTH=1: a bench build with no stream has no way to report anything"
+#endif
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -522,7 +567,7 @@ uint16_t    cal_time=185;
 int         calibrat_now=0,loop_start=0;
 int16_t cct = 0;
 
-#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+#if USE_MAZE_TELEMETRY || USE_MAZE_HEALTH
 /* calibr_ir() sits ABOVE the telemetry block, but it is where the one and only
    T line is sent from, so it needs the stamp that block defines.  A forward
    declaration rather than moving tlm_ms up here: the variable belongs with the
@@ -583,7 +628,7 @@ void calibr_ir()
 							   forever to carry the same numbers.  Under both telemetry
 							   macros, so a diagnostic build still reports its own
 							   calibration; a plain build sends nothing, as before. */
-#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+#if USE_MAZE_TELEMETRY || USE_MAZE_HEALTH
 							{
 								char* q = BLT_TX_Buffer;
 								q += sprintf(q, "T,%lu,mid", (unsigned long)tlm_ms);
@@ -762,11 +807,12 @@ signed int ab(signed int num)
 	return num;
 	
 }
-#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+#if USE_MAZE_TELEMETRY || USE_MAZE_HEALTH
 /* ======================= M1 telemetry (diagnostic build) ====================
    Compact machine-parseable lines on the Bluetooth link (USART1, 115200 baud).
-   Define USE_MAZE_TELEMETRY to get them; with the macro undefined this block
-   and every hook below compile away, so the normal firmware is unaffected.
+   Set USE_MAZE_TELEMETRY to 1 in the BUILD SWITCHES block above to get them;
+   with it 0 this block and every hook below compile away, so the normal
+   firmware is unaffected.
 
    SHARED WITH THE HEALTH BUILD.  USE_MAZE_HEALTH (the block below this one)
    streams a different set of lines, but it rides this same 1 ms timebase and
@@ -798,7 +844,7 @@ signed int ab(signed int num)
    ---------------------------------------------------------------------------- */
 volatile uint32_t tlm_ms = 0;              /* the stamp on every line, either build */
 
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 volatile uint8_t  tlm_fast = 0;   /* 1 ms divider -> tlm_due every 8 ms */
 volatile _Bool    tlm_due  = 0;   /* set by the 1 ms tick, cleared by the loop */
 
@@ -827,7 +873,7 @@ static unsigned tlm_rear(void)
    waiting, or BLT_SendData() would truncate one of the two (Hardware.c:135).
    A health-only build queues nothing, so the test folds to a constant there
    instead of carrying a variable that can only ever read zero. */
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 #define TLM_EVENT_PENDING()  (tlm_has_pending)
 #else
 #define TLM_EVENT_PENDING()  (0)
@@ -840,14 +886,14 @@ static unsigned tlm_rear(void)
    states 7 and up are the stopped-after-a-run ones and belong to the health
    stream instead, so the two senders never contend for the link.  Unchanged
    behaviour when the health build is off. */
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 #define TLM_DRIVING()  (loop_start != 0 && loop_start < 7)
 #else
 #define TLM_DRIVING()  (loop_start != 0)
 #endif
 
 
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 /* ==================== BENCH HEALTH CHECK (diagnostic build) ================
    What this is for: the robot could not be looked at without driving it.  The
    mission stream above only runs while a run is in progress (TLM_DRIVING), so a
@@ -856,12 +902,13 @@ static unsigned tlm_rear(void)
    not on the wire at all (the dumps that would have carried them are commented
    out further down this file).
 
-   Define USE_MAZE_HEALTH to stream them whenever the robot is STANDING STILL:
-   in the boot loop before KEY1, and in states 7+ after a run.  Press KEY1 and
-   the boot loop exits, so the stream stops and the mission starts normally --
-   there is no mode to enter and nothing to remember.
+   Set USE_MAZE_HEALTH to 1 in the BUILD SWITCHES block above to stream them
+   whenever the robot is STANDING STILL: in the boot loop before KEY1, and in
+   states 7+ after a run.  Press KEY1 and the boot loop exits, so the stream
+   stops and the mission starts normally -- there is no mode to enter and
+   nothing to remember.
 
-   Define HEALTH_ONLY as well for the BENCH build: the boot loop then never
+   Set HEALTH_ONLY to 1 as well for the BENCH build: the boot loop then never
    exits, so the robot cannot start a mission at all.  The two calibrations move
    onto the keys (KEY2 = IR, KEY3 = gyro) and KEY1 becomes an inert "send the
    banner again" button.  Bench bring-up wants statuses, not a run.
@@ -1181,7 +1228,7 @@ static char brain_report(int target)
 
 	move = (char)brain_step(&in);
 
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 	/* M1: one line per junction.  The first twelve fields are unchanged from
 	   the legacy format so the existing parser keeps working; the three new
 	   ones are what the brain saw and decided.  `cross` is derived from the
@@ -1250,7 +1297,7 @@ void TIM17_IRQHandler(void)
 void USART1_IRQHandler()
 {
   char Data = USART1->RDR;
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 	/* Any byte the app sends is a liveness probe -- see health_hello above.
 	   The flag is raised here and the banner is sent from the loop, because
 	   BLT_SendData() restarts the TX DMA and has no business running inside an
@@ -1278,10 +1325,10 @@ void TIM14_IRQHandler(void)
 	Task100Ms++;
 	Task1000Ms++;
 	Task20Ms++;
-#if defined(USE_MAZE_TELEMETRY) || defined(USE_MAZE_HEALTH)
+#if USE_MAZE_TELEMETRY || USE_MAZE_HEALTH
 	tlm_ms++;
 #endif
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 	/* M1 time base.  tlm_ms is the stamp on every line.  tlm_due paces the
 	   sensor stream at 125 Hz (every 8 ms), which costs ~3.2 ms of TX per
 	   8 ms -- 40% of a 115200 link.  Deliberately NOT the 50 Hz Task20Ms
@@ -1289,7 +1336,7 @@ void TIM14_IRQHandler(void)
 	   sample period could not resolve it at all. */
 	if (++tlm_fast >= 8) { tlm_fast = 0; tlm_due = 1; }
 #endif
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 	/* Health stream at 20 Hz.  Slower than the mission stream on purpose: an
 	   H line is ~118 bytes and a person is reading it, not a branch detector.
 	   Together with the T lines the pair costs ~2.7 kB/s of the 11.5 kB/s
@@ -1417,7 +1464,7 @@ int main(void)
 
   IR_PWR(1);
 
-#ifdef HEALTH_ONLY
+#if HEALTH_ONLY
 	/* ==========================================================================
 	 * BENCH MODE -- this loop NEVER exits, so the robot never starts a mission.
 	 *
@@ -1428,9 +1475,9 @@ int main(void)
 	 * and the two calibrations move onto the keys instead: KEY2 = the IR
 	 * calibration, KEY3 = the gyro one, exactly as in a mission.
 	 *
-	 * To get the mission back, rebuild without HEALTH_ONLY -- `USE_HEALTH=1`
-	 * sets it, `USE_TELEMETRY=1` does not.  Nothing else in the firmware knows
-	 * this macro exists.
+	 * To get the mission back, set HEALTH_ONLY back to 0 in the BUILD SWITCHES
+	 * block at the top of this file and rebuild.  Nothing else in the firmware
+	 * knows this macro exists.
 	 * ========================================================================== */
 	static volatile _Bool bench_leave = 0;
 	for (;;)
@@ -1438,15 +1485,15 @@ int main(void)
 	while(KEY1==0)
 #endif
 	{
-#ifdef HEALTH_ONLY
+#if HEALTH_ONLY
 		 /* The way out -- for the compiler as much as for anyone else.  A loop
 		    it can prove is infinite makes everything after it unreachable, and
 		    ARMCC says so (warning #128-D at the mission init below).  volatile
 		    means it cannot prove that, so the code below the loop stays live
 		    and the zero-warning rule holds without a pragma suppressing a
 		    diagnostic that might one day be real.  Nothing in the firmware
-		    sets this flag: reach it from a debugger, or just rebuild without
-		    HEALTH_ONLY. */
+		    sets this flag: reach it from a debugger, or just set HEALTH_ONLY
+		    back to 0 at the top of this file and rebuild. */
 		 if (bench_leave) break;
 #endif
 		 if(KEY3)
@@ -1462,12 +1509,12 @@ int main(void)
 		 }
 		 Read_IRSensors();
 
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 		 /* The bench health stream.  This loop IS the "robot is idle" state --
 			 it runs from power-up until KEY1 -- so the diagnostics run here and
 			 nowhere else before a mission.  Leaving the loop on the KEY1 press
 			 stops the stream by itself. */
-#ifdef HEALTH_ONLY
+#if HEALTH_ONLY
 		 /* KEY1 is inert in bench mode, but not silent: it asks the firmware to
 			 re-send the banner, which is the same handshake the app uses on
 			 connect.  A button that proves the radio from the robot's side. */
@@ -1514,7 +1561,7 @@ int main(void)
 		
 		IR_PWR(1);
 
-#ifdef USE_MAZE_HEALTH
+#if USE_MAZE_HEALTH
 		/* Bench health stream, for the states where the robot is standing STILL
 		   -- 0 before a run, 7+ after one.  The 2 ms task below already calls
 		   Calculate_Z_Angle() at the right rate, so unlike the boot loop this
@@ -1532,7 +1579,7 @@ int main(void)
 		}
 #endif
 
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 		/* M1: exactly one TX slot per 8 ms tick -- a queued event if one is
 		   waiting, otherwise a sensor sample. Never both, because a second
 		   BLT_SendData() would truncate the first (Hardware.c:135).
@@ -1606,7 +1653,7 @@ int main(void)
 		
     const _Bool OnEndZoon = end_zone_timer > 2 ? 1 : 0 ;
 
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 		/* M1: log the target-zone latch on change only. On *entry* the 'D' line
 		   path_append queues a few lines below overwrites this in the pending
 		   slot -- intended, the 'D' is the more informative record. The exit
@@ -1722,7 +1769,7 @@ int main(void)
 					}
 					else
 					{
-#ifdef USE_MAZE_TELEMETRY
+#if USE_MAZE_TELEMETRY
 						/* BRING-UP PAUSE.  Print the decision, wait five seconds,
 						   then make the move -- so an operator watching the
 						   Bluetooth log can read what the brain decided, check it

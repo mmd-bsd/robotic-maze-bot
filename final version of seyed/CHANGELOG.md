@@ -145,6 +145,75 @@
 
 ## History (newest first)
 
+### 2026-09-24 — The build switches live in `main.c`: two lists became one
+
+**Reported:** *"i hate #ifdef format in coding, what the hell is that? how can i
+control the values? HEALTH_ONLY, USE_MAZE_HEALTH…"* — a fair question with a bad
+answer at the time: **there was no one place.** `USE_MAZE_TELEMETRY`,
+`USE_MAZE_HEALTH` and `HEALTH_ONLY` were set by `USE_TELEMETRY=1` / `USE_HEALTH=1`
+on `build_firmware.sh` **and**, independently, by `main.c`'s `Define:` box in
+`Source.uvprojx:444` (`USE_MAZE_TELEMETRY,USE_MAZE_HEALTH`). The Keil box was
+target-**file**-scoped to `main.c`, so the target-wide box did not carry it and it
+was easy to miss. Two lists, neither aware of the other, both claiming success →
+the IDE and the script could build two different firmwares out of one project.
+
+**What changed.** The three macros are now plain `0`/`1` in a `BUILD SWITCHES`
+block in `main.c` (in the CubeMX `USER CODE BEGIN PD` slot, so the generator
+preserves it), and **that file is the only place they exist**:
+
+```c
+#define USE_MAZE_TELEMETRY  0
+#define USE_MAZE_HEALTH     0
+#define HEALTH_ONLY         0
+```
+
+- **`firmware/Core/Src/main.c`** — the block; every `#ifdef NAME` → `#if NAME`
+  and `#if defined(A) || defined(B)` → `#if A || B` (20 sites, 4 `replace_all`
+  edits); the four comment blocks that described the `-D` mechanism rewritten;
+  and a new `#error` refusing `HEALTH_ONLY 1` with `USE_MAZE_HEALTH 0`.
+- **`scripts/build_firmware.sh`** — every `-D` for the three is gone. It now
+  *reads* the block (`sw_val()`, a `sed` per name) and echoes the values in the
+  banner, and **exits 2** if it cannot read them — so a deleted or misspelled
+  switch line is an error rather than a silent plain build. `USE_TELEMETRY=1` /
+  `USE_HEALTH=1` no longer exist.
+- **`firmware/MDK-ARM/Source.uvprojx`** — `main.c`'s `Define:` box emptied.
+  Keil now builds the same firmware as the script by construction.
+- **Scripts** — `parse_telemetry.py` (4 strings), `bt_monitor.py` (3),
+  `measure_solver_ram.sh` (usage + it now echoes the switches from the build log).
+- **Docs** — `ARCHITECTURE.md` §4 table, `STATUS.md` (incl. a new design-decision
+  bullet), `BUILD_GUIDE.md`, `SENSORS.md`, root `CLAUDE.md`.
+
+**Why `#if NAME` and not a runtime mode variable.** Each switch removes whole
+functions; this is an 8 KB part (1360 B free) with nothing to spare for a mode
+flag or a hot-path branch for a decision only ever made on the bench. The
+consequence to know: `#if` on an *undefined* identifier reads as `0`, which is why
+the script refuses an unreadable block instead of trusting the default.
+
+**Verified, not assumed.** Built all three states and compared against the
+pre-switch build of the same commit (`git stash` of the three files):
+
+| State | Before | After |
+|---|---|---|
+| all `0` | 40080 / 6832 | 40080 / 6832 |
+| health `1` + `HEALTH_ONLY 1` | 41176 / 6848 | 41176 / 6848 |
+| telemetry `1` + health `1` | 42124 / 6912 | 42124 / 6912 |
+
+Byte-identical in all three, zero warnings (ARMCC `#error` path checked by
+building the refused combination), and `build_all.ps1` still passes — 21 unit
+tests + oracle selftest + 4 replays. **This was a control change, not a code
+change.**
+
+**Lesson — a size with no mode written next to it is half a measurement.**
+`BUILD_GUIDE.md` and `STATUS.md` both carried a bench figure of **41560**; the
+real number was **41176**, stale by 384 B, and their "plain" row (40820) was stale
+by 740 B too. Both tables are corrected here, and `build_firmware.sh` now prints
+the switches beside the size so the next measurement cannot drift the same way.
+
+**Lesson — two ways to set the same macro is worse than one way with a bad name.**
+The `hate #ifdef` complaint was not really about `#ifdef`; it was about not being
+able to answer "what is this build?". That question now has one answer, in one
+file, echoed by the build.
+
 ### 2026-09-24 — Gyro_Z was a raw count wearing a deg/s label (~14x too big)
 
 **Reported:** *"gyro_z unit is wrong for sure it cant be deg/sec its much bigger.

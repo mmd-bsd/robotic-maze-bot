@@ -441,7 +441,7 @@
                     <v6Rtti>2</v6Rtti>
                     <VariousControls>
                       <MiscControls></MiscControls>
-                      <Define>USE_MAZE_TELEMETRY,USE_MAZE_HEALTH</Define>
+                      <Define></Define>
                       <Undefine></Undefine>
                       <IncludePath></IncludePath>
                     </VariousControls>

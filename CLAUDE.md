@@ -72,11 +72,17 @@ All C flags: `-std=c11 -Wall -Wextra -pedantic`, plus `-lm` (fast-run float math
 ```bash
 cd "final version of seyed/robot codes"
 bash scripts/build_firmware.sh                  # build + link, prints the Keil size line
-USE_TELEMETRY=1 bash scripts/build_firmware.sh  # the supervised bring-up build
 bash scripts/measure_solver_ram.sh              # the 8 KB RAM budget, per object
 ```
 
-Uses Keil's own **ARM Compiler 5** (`uAC6=0`, `C:\Keil_v5\ARM\ARMCC\bin`) — **not** armclang. Measured 2026-09-24: the plain brain-driven build is **40080 / 65536 flash, 6832 / 8192 RAM (1360 B free)**; the `USE_TELEMETRY=1` bring-up build costs 2 KB more flash and 80 B more RAM (**42124 / 6912**, 1280 B free). Run `measure_solver_ram.sh` — or rather, re-link — before claiming anything fits.
+**The build takes no mode argument.** The three diagnostic switches —
+`USE_MAZE_TELEMETRY`, `USE_MAZE_HEALTH`, `HEALTH_ONLY` — are plain `0`/`1` in
+`firmware/Core/Src/main.c`'s `BUILD SWITCHES` block, and that file is the only
+place they exist: no `-D` flags, and Keil's `main.c` `Define:` box is empty. Set
+them, rebuild, and the banner echoes back what was built. Bring-up = telemetry `1`
++ health `1` + `HEALTH_ONLY 0`; bench = health `1` + `HEALTH_ONLY 1`.
+
+Uses Keil's own **ARM Compiler 5** (`uAC6=0`, `C:\Keil_v5\ARM\ARMCC\bin`) — **not** armclang. Measured 2026-09-24: the plain brain-driven build is **40080 / 65536 flash, 6832 / 8192 RAM (1360 B free)**; the telemetry+health bring-up build costs 2 KB more flash and 80 B more RAM (**42124 / 6912**, 1280 B free); the health bench build is **41176 / 6848**. Run `measure_solver_ram.sh` — or rather, re-link — before claiming anything fits.
 
 ### Shell note
 
@@ -214,7 +220,7 @@ On `BRAIN_DONE`, `brain_home_path()` and `brain_fast_path()` supply the two repl
 - `New Start/Simulator/py-code/maze solving/maze_gbf/stm-sample-code/main.c` — an earlier `USE_MAZE_GBF` integration via a `maze_hal.h` (history)
 - `final version of seyed/robot codes/inc/brain.h` — **the contract.** Read this before touching `main.c`.
 
-**Remaining work:** on-target bring-up only. Nothing in the repo can check the brain's *model* against the physical robot (`brain_host.c` drives the brain from a model of the robot, so a wrong model is invisible to it). Flash `USE_TELEMETRY=1`, press KEY1, and **watch it live with `scripts/bt_monitor.py`** — it feeds each junction's real `BrainIn` to `build/brain_oracle.exe` (the real `brain.c`) and flags a divergent decision at the junction, while the robot is still on the field. Then read §2 and §6 of `parse_telemetry.py`'s report for the offline measurements.
+**Remaining work:** on-target bring-up only. Nothing in the repo can check the brain's *model* against the physical robot (`brain_host.c` drives the brain from a model of the robot, so a wrong model is invisible to it). Flash the bring-up build (telemetry `1` + health `1` in `main.c`), press KEY1, and **watch it live with `scripts/bt_monitor.py`** — it feeds each junction's real `BrainIn` to `build/brain_oracle.exe` (the real `brain.c`) and flags a divergent decision at the junction, while the robot is still on the field. Then read §2 and §6 of `parse_telemetry.py`'s report for the offline measurements.
 
 **⚠ OPEN — settle on the robot before trusting P1: `in.front` is fused to `left`/`right`.** `main.c:932` builds `in.front` as `(s[3]||s[4]||s[5]||s[6])`, and `main.c:1338-1339` builds the laterals on that **same** term, so:
 

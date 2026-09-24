@@ -323,7 +323,8 @@ the text report are drawn from `parse_telemetry.PAD_CELL`, so the screen cannot
 disagree with §1.
 
 ```bash
-USE_HEALTH=1 bash scripts/build_firmware.sh      # bench build: no mission at all
+# main.c BUILD SWITCHES:  USE_MAZE_HEALTH 1 + HEALTH_ONLY 1  (bench: no mission)
+bash scripts/build_firmware.sh
 python scripts/bt_monitor.py                     # health panel is automatic while idle
 ```
 

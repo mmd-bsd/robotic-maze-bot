@@ -178,7 +178,7 @@ PHASE_NAME = {0: "EXPLORE", 1: "RETURN_HOME", 2: "FAST_RUN", 3: "DONE"}
 CANVAS_NAME = {"diag": "diag", "path": "path draw"}
 
 # The one byte the app ever says to the robot.  Value is arbitrary: the firmware's
-# USART1 IRQ flags ANY received byte under USE_MAZE_HEALTH, so the payload only
+# USART1 IRQ flags ANY received byte when USE_MAZE_HEALTH is 1, so the payload only
 # has to be something the operator can recognise in a wiring trace.  Kept as
 # `?` because it is also the byte a terminal user would type by hand to test.
 PROBE_BYTE = b"?"
@@ -817,7 +817,7 @@ def run_headless_health(pipe, lines):
 
     if not pipe.health.h:
         print("bt_monitor --health: no H lines in this capture -- nothing to check.")
-        print("  H/T lines exist only in a USE_MAZE_HEALTH build (BUILD_GUIDE.md,")
+        print("  H/T lines exist only when USE_MAZE_HEALTH is 1 in main.c")
         print("  'Health check') and only while the robot stands still.  A")
         print("  mission capture has none, so this is almost certainly the wrong")
         print("  file, and it must not look like a pass.")
@@ -2032,8 +2032,8 @@ def main():
                     help="no GUI; exit 1 on any decision mismatch")
     ap.add_argument("--health", action="store_true",
                     help="bench health check only (needs an H/T capture, i.e. a "
-                         "USE_MAZE_HEALTH build); exit 1 on any FAIL, 2 if the "
-                         "capture has no H lines at all")
+                         "build with USE_MAZE_HEALTH 1 in main.c); exit 1 on any "
+                         "FAIL, 2 if the capture has no H lines at all")
     ap.add_argument("--oracle", default=DEFAULT_ORACLE,
                     help="path to brain_oracle.exe")
     ap.add_argument("--no-oracle", action="store_true",

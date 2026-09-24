@@ -198,16 +198,26 @@ bash scripts/build_firmware.sh
 ```
 
 **Two compile-time diagnostics, never both in one state.** They are mutually
-exclusive by *when* they run, not by macro: the mission stream (`S`/`J`/`Z`/`B`)
+exclusive by *when* they run, not by switch: the mission stream (`S`/`J`/`Z`/`B`)
 only fires while driving, the health stream (`H`/`T`) only while stopped, and one
 predicate — `TLM_DRIVING()` — is what separates them.
 
-| Flag | Build | Streams |
-|---|---|---|
-| *(none)* | normal | nothing; the build that races |
-| `USE_MAZE_HEALTH` | `USE_HEALTH=1` | `H`/`T` while stopped — keys, 18 IR, gyro |
-| `USE_MAZE_HEALTH` + `HEALTH_ONLY` | `USE_HEALTH=1` | the same, and the robot **cannot start a mission** — the pre-KEY1 loop never exits, so `loop_start` stays 0 for the whole session. This is the bench build; KEY2 = IR calibration, KEY3 = gyro, KEY1 = re-send the banner |
-| `USE_MAZE_TELEMETRY` (+ health) | `USE_TELEMETRY=1` | `S`/`J`/`Z`/`B` while driving **and** the health stream while stopped, plus the 5 s per-junction pause (the supervised bring-up build — and this one must be able to run, so it never defines `HEALTH_ONLY`) |
+**The switches are `0`/`1` in `main.c`, in its `BUILD SWITCHES` block, and that
+file is the only place they exist.** No `-D` flag sets them — not
+`build_firmware.sh`, and not the Keil project (`main.c`'s `Define:` box is
+empty) — so the IDE and the command line cannot build two different firmwares
+from one project, which they silently could until 2026-09-24. `build_firmware.sh`
+*reads* the block and echoes the values in its banner, so every build reports
+what it built. A fourth thing to know: `HEALTH_ONLY 1` with `USE_MAZE_HEALTH 0`
+is refused at compile time, since a bench build with no stream can neither run
+nor report.
+
+| Switches in `main.c` | Streams |
+|---|---|
+| all `0` | normal — nothing; the build that races |
+| `USE_MAZE_HEALTH 1` | `H`/`T` while stopped — keys, 18 IR, gyro |
+| `USE_MAZE_HEALTH 1` + `HEALTH_ONLY 1` | the same, and the robot **cannot start a mission** — the pre-KEY1 loop never exits, so `loop_start` stays 0 for the whole session. This is the bench build; KEY2 = IR calibration, KEY3 = gyro, KEY1 = re-send the banner |
+| `USE_MAZE_TELEMETRY 1` (+ `USE_MAZE_HEALTH 1`) | `S`/`J`/`Z`/`B` while driving **and** the health stream while stopped, plus the 5 s per-junction pause (the supervised bring-up build — and this one must be able to run, so `HEALTH_ONLY` stays `0`) |
 
 Both streams are read by the same two tools, which go through one parser
 (`scripts/parse_telemetry.py`) so they cannot drift: `bt_monitor.py` for live
@@ -219,7 +229,7 @@ kinds until clicked; `--health` pins both. Since 2026-09-24; they were one
 button, which made "health cards up beside the map" unaskable.
 
 The robot also **announces itself**: the `Hi ,mmdi` banner goes out on reset, and
-under `USE_MAZE_HEALTH` the USART RX interrupt makes any received byte produce the
+with `USE_MAZE_HEALTH 1` the USART RX interrupt makes any received byte produce the
 same banner, so the monitor app can prove the radio works in *both* directions
 rather than inferring it from a stream that has not started yet. That banner is the
 only line on the wire that can be a reply.

@@ -9,11 +9,17 @@
 # This lets you check "does it still fit?" in one command, without opening Keil.
 #
 # Usage (from robot codes/):
-#   bash scripts/build_firmware.sh                 # the mission firmware
-#   USE_HEALTH=1    bash scripts/build_firmware.sh # + the bench health check only
-#   USE_TELEMETRY=1 bash scripts/build_firmware.sh # + mission telemetry AND the
-#                                                  #   health check (one flash
-#                                                  #   covers bench + run)
+#   bash scripts/build_firmware.sh                 # builds whatever the switches
+#                                                  #   in main.c say -- there is
+#                                                  #   no argument for it
+#
+# THE BUILD SWITCHES LIVE IN firmware/Core/Src/main.c, in the "BUILD SWITCHES"
+# block near the top: USE_MAZE_TELEMETRY, USE_MAZE_HEALTH and HEALTH_ONLY, each
+# written as a plain 0 or 1.  This script does NOT pass -D flags for them, and
+# neither does Keil, so that file is the one and only place the image is
+# decided -- edit it, rebuild, and the two toolchains cannot disagree about
+# what was flashed.  The values in force are echoed in the banner below, so a
+# build always reports what it built.
 #
 # Override the Keil location if needed:
 #   KEIL=/c/Keil_v5/ARM/ARMCC/bin bash scripts/build_firmware.sh
@@ -50,16 +56,33 @@ OUT="$SOLVER/build/firmware"
 
 CPU="Cortex-M0+"
 
+# ---- build switches: REPORTED here, never SET here ----
+# Read straight out of main.c so the banner cannot drift from the image.  A
+# build that quietly ignored what you set would be worse than no banner at all.
+SWITCH_C="$FW/Core/Src/main.c"
+sw_val() {
+    sed -n "s/^#define[[:space:]]*$1[[:space:]]*\([01]\).*/\1/p" "$SWITCH_C" | head -1
+}
+TLM=$(sw_val USE_MAZE_TELEMETRY)
+HLT=$(sw_val USE_MAZE_HEALTH)
+HON=$(sw_val HEALTH_ONLY)
+for v in "$TLM" "$HLT" "$HON"; do
+    if [ -z "$v" ]; then
+        echo "ERROR: could not read the build switches from:" >&2
+        echo "       $SWITCH_C" >&2
+        echo "       expected lines shaped like:  #define USE_MAZE_TELEMETRY  0" >&2
+        exit 2
+    fi
+done
+
 MODE="brain-driven (decision core + solver library)"
-if [ "${USE_TELEMETRY:-0}" = "1" ]; then
-    MODE="$MODE + USE_MAZE_TELEMETRY ON (M1 bench build: 125 Hz sensor/encoder dump)"
-    MODE="$MODE + USE_MAZE_HEALTH ON (bench health check: keys + 18 IR + gyro)"
-elif [ "${USE_HEALTH:-0}" = "1" ]; then
-    MODE="$MODE + USE_MAZE_HEALTH ON (bench health check: keys + 18 IR + gyro)"
-    MODE="$MODE + HEALTH_ONLY ON (BENCH: KEY1 disabled, no mission)"
-fi
+[ "$TLM" = "1" ] && MODE="$MODE + TELEMETRY (S/J/Z while driving, 5 s pause per junction)"
+[ "$HLT" = "1" ] && MODE="$MODE + HEALTH (H/T while stopped: keys, 18 IR, gyro)"
+[ "$HON" = "1" ] && MODE="$MODE + HEALTH_ONLY (bench: KEY1 inert, no mission)"
+
 echo "=============================================="
 echo " SEYED firmware build -- $MODE"
+echo " Switches, from main.c: TELEMETRY=$TLM  HEALTH=$HLT  HEALTH_ONLY=$HON"
 echo " Project : $FW"
 echo " Output  : $OUT"
 echo "=============================================="
@@ -74,33 +97,13 @@ CFLAGS+=("-I$FW/Drivers/CMSIS/Include")
 CFLAGS+=("-I$SOLVER/inc")
 # There is no USE_MAZE_SOLVER switch any more: the brain IS the decision maker,
 # the legacy explorer was deleted outright, and main.c no longer tests the flag.
-# M1 bench telemetry: sensor masks + encoder counts over the Bluetooth link.
-# Adds ~72 B of RAM (tlm_ms + a 64 B pending line).  It also arms the 5 s
-# bring-up pause, so USE_TELEMETRY=1 is the SUPERVISED build -- the plain build
-# drives on without stopping.
-[ "${USE_TELEMETRY:-0}" = "1" ] && CFLAGS+=(-DUSE_MAZE_TELEMETRY)
-
-# Bench health check: KEY1/2/3 + all 18 raw IR sensors + gyro, streamed whenever
-# the robot is standing still (before KEY1, and after a run).  It reuses the M1
-# timebase and TX buffer, so it costs two bytes of RAM and no new buffer.
 #
-# USE_TELEMETRY=1 turns it on as well, deliberately: the health stream runs in
-# the stopped states and the mission stream in the driving ones, so one flashed
-# build serves both the bench check and the run -- no reflashing in between.
-if [ "${USE_HEALTH:-0}" = "1" ] || [ "${USE_TELEMETRY:-0}" = "1" ]; then
-    CFLAGS+=(-DUSE_MAZE_HEALTH)
-fi
-
-# HEALTH_ONLY is the BENCH build, and it is the ONLY difference between
-# USE_HEALTH=1 and USE_TELEMETRY=1: with it, the pre-KEY1 loop never exits, so
-# the robot cannot start a mission no matter what is pressed.  KEY2/KEY3 then
-# drive the two calibrations and KEY1 re-sends the banner.
-#
-# Deliberately NOT implied by USE_TELEMETRY=1 -- that is the bring-up build and
-# it has to be able to run.  A bench session wants the opposite.
-if [ "${USE_HEALTH:-0}" = "1" ]; then
-    CFLAGS+=(-DHEALTH_ONLY)
-fi
+# And no -D flags for the three diagnostic switches either.  They used to be set
+# here (USE_TELEMETRY=1 / USE_HEALTH=1) AND separately in main.c's "Define:" box
+# in Source.uvprojx, which is how the IDE and this script could build two
+# different firmwares out of one project without either saying so.  They are now
+# 0/1 in main.c's BUILD SWITCHES block, which is the single source of truth.
+# Nothing below defines them, so nothing below can override them.
 
 # ---- source list: exactly what Source.uvprojx compiles ----
 # Deliberately NOT a glob of HAL_Driver/Src, which also holds *_template.c

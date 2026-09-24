@@ -158,7 +158,8 @@ can do is check the brain's *model* against the physical robot: `brain_host.c`
 drives the brain from a model of the robot, so a wrong model is invisible to it.
 
 ```bash
-USE_TELEMETRY=1 bash scripts/build_firmware.sh   # the SUPERVISED build
+# set USE_MAZE_TELEMETRY 1 + USE_MAZE_HEALTH 1 in main.c's BUILD SWITCHES first
+bash scripts/build_firmware.sh                   # the SUPERVISED build
 bash scripts/measure_solver_ram.sh               # the RAM budget, per object
 python scripts/bt_monitor.py                     # LIVE: opens COM9 by itself
 python scripts/parse_telemetry.py capture.txt    # offline report, after the run
@@ -303,20 +304,26 @@ in this repo — they only exist on the physical robot:
 3. **how long the branch detector stays live**, which is the decision's timing budget
 
 ```bash
-USE_TELEMETRY=1 bash scripts/build_firmware.sh   # -> build/firmware/seyed.hex
+# set USE_MAZE_TELEMETRY 1 (+ USE_MAZE_HEALTH 1) in main.c's BUILD SWITCHES:
+bash scripts/build_firmware.sh                   # -> build/firmware/seyed.hex
 python scripts/parse_telemetry.py capture.txt    # -> the measurements
 ```
 
-The telemetry build is now also **the supervised build**: `USE_TELEMETRY`
+The telemetry build is now also **the supervised build**: the telemetry switch
 additionally arms the 5 s bring-up pause before each junction move. It costs
-+72 B RAM / +~1 KB flash over the plain build, and with the macro undefined the
+about +2 KB flash / +80 B RAM over the plain build, and with the switch `0` the
 path costs exactly nothing.
 
-| Build | Flash | RAM |
+The switches live in `main.c`'s `BUILD SWITCHES` block as plain `0`/`1` — not in
+`-D` flags. The build banner reads them back, and the table below is that banner
+(measured 2026-09-24, with the pre-switch build of the same date giving identical
+bytes):
+
+| Build (switches in `main.c`) | Flash | RAM |
 |---|---|---|
-| Brain-driven (plain) | 40820 / 65536 (62%) | 6832 / 8192 (1360 free) |
-| + health **bench** (`USE_HEALTH=1`, adds `HEALTH_ONLY`) | 41560 / 65536 (63%) | 6848 / 8192 (1344 free) |
-| + telemetry, which includes health, and can still run | 42264 / 65536 (64%) | 6912 / 8192 (1280 free) |
+| Brain-driven (all `0`) | 40080 / 65536 (61%) | 6832 / 8192 (1360 free) |
+| + health **bench** (health `1` + `HEALTH_ONLY 1`) | 41176 / 65536 (62%) | 6848 / 8192 (1344 free) |
+| + telemetry, which includes health, and can still run (telemetry `1` + health `1`) | 42124 / 65536 (64%) | 6912 / 8192 (1280 free) |
 
 **The `J` line gained three fields** (`target`, `dist_cm`, `node`) and a new
 **`B` line** was added for the bring-up decision, so captures from a build
@@ -337,8 +344,9 @@ pre-KEY1 robot is silent, and `brain_host.c` drives the brain from a **model**, 
 a wrong model is invisible to it. M1.5 is the second question.
 
 ```bash
-USE_HEALTH=1    bash scripts/build_firmware.sh   # BENCH: also defines HEALTH_ONLY
-USE_TELEMETRY=1 bash scripts/build_firmware.sh   # both -- the one to flash to run
+# main.c BUILD SWITCHES:  health 1 + HEALTH_ONLY 1  = BENCH, cannot run
+#                        telemetry 1 + health 1    = one flash covers bench + run
+bash scripts/build_firmware.sh
 python scripts/bt_monitor.py                     # both switches follow the capture
 python scripts/bt_monitor.py --health            # or pin them: health cards + pad board
 python scripts/bt_monitor.py --replay cap.txt --headless --health   # exit 1 on FAIL
@@ -363,17 +371,19 @@ loses is the ability to re-derive the bit on the host. `TLM_DRIVING()` is the si
 the health sender and the mission sender from ever calling `BLT_SendData()` in one
 pass; a queued `J`/`Z` event always wins its slot.
 
-**`USE_HEALTH=1` is the bench build, and it cannot run a mission.** It also defines
-`HEALTH_ONLY`, which makes the pre-KEY1 boot loop never exit. KEY2 drives the IR
+**Health `1` + `HEALTH_ONLY 1` is the bench build, and it cannot run a mission.**
+`HEALTH_ONLY` makes the pre-KEY1 boot loop never exit. KEY2 drives the IR
 calibration, KEY3 the gyro one, and KEY1 only re-sends the banner. A bench session
 therefore leaves `loop_start` at **0 forever** — and that is the point: it is the
 proof `HEALTH_ONLY` took. Anything else means the mission started.
-`USE_TELEMETRY=1` deliberately does **not** define it; that build has to be able to
-drive.
+The bring-up build leaves `HEALTH_ONLY` at `0` deliberately; that build has to be
+able to drive. (Two switches, not one: `HEALTH_ONLY 1` with health `0` is refused
+at compile time, so the combination that would brick the bench silently cannot be
+built at all.)
 
 **The robot announces itself.** On reset the unconditional `Hi ,mmdi` banner at
 `main.c:1313` goes out ~300 ms after power-up — usually before anyone has
-connected, which is why the IRQ now answers too: under `USE_MAZE_HEALTH` *any*
+connected, which is why the IRQ now answers too: with `USE_MAZE_HEALTH` at `1`, *any*
 received byte sets `health_hello`, `health_tick()` replies with the same banner, and
 `SerialSource.send()` gives the app its first-ever TX path (probe on connect + a
 **Ping robot** button). This is the only line on the wire that can be a *reply*, so
@@ -532,6 +542,7 @@ build/brain_oracle.exe --probe        # print the same steps, unchecked
 - **The seam is `brain_step()`, not a HAL.** The brain is a pure decision function — `BrainIn` in, one `'F'/'L'/'R'/'B'` out — and the firmware keeps all sensing and all motion. It never reads a sensor, motor, encoder or compass, and it holds no firmware pointer. `maze_hal.h` proposed the opposite (the solver driving the robot through `maze_hal_tick()` while the legacy explorer kept its own map) and is deleted; two integration points for one job meant two RAM budgets. See `inc/brain.h`.
 - **The brain owns the map, the firmware owns the robot.** `maze_hal.h`'s HAL used to declare the firmware's `link[][]` / `node[][]` as `extern` so the solver could read them. Those arrays are gone; nothing in the library reaches into the firmware now.
 - **The health stream carries one bit per pad (`IR_ADC[i] <= IR_mid[i]-500`) and `IR_mid` ONCE, at calibration — never the raw `IR_ADC[]`, and never the firmware's `s[]` mask.** On the bench `s[]` is all-zero (the hysteresis block lives in the superloop; the one-shot init runs only after KEY1), so streaming it would publish a *third* derivation rather than the firmware's own value — and a reader would take it for the firmware's opinion. The bit is therefore computed at send time, and the `S`/`J` lines stay the authority on what the firmware believed while driving. The cost is stated and accepted: the host can no longer re-derive the bit, so the checks that needed the magnitude of a reading are gone (see BUILD_GUIDE.md). Changing this back is a RAM/bandwidth decision plus a rewrite of the fixtures — ask first.
+- **The three diagnostic switches are `0`/`1` in `main.c`'s `BUILD SWITCHES` block, and that file is the only place they are set — no `-D` flags.** `USE_MAZE_TELEMETRY`, `USE_MAZE_HEALTH` and `HEALTH_ONLY` were previously set by `USE_TELEMETRY=1` / `USE_HEALTH=1` on the build script *and*, separately, by `main.c`'s `Define:` box in `Source.uvprojx` — two lists, neither aware of the other, so the IDE and the command line could build two different firmwares out of one project and both claim success. The Keil box is now empty and the script only *reads* the block and echoes the values in its banner. They stay compile-time rather than a runtime mode variable because each one removes whole functions from an 8 KB part. Two failure modes are now caught instead of compiling quietly: `build_firmware.sh` refuses to build if it cannot read the block (so a deleted or misspelled switch line is an error, not an accidental plain build), and `#error` refuses `HEALTH_ONLY 1` with health `0`, which would be a bench build that can neither run nor report. Sizes re-measured against the pre-switch build of the same date: byte-identical in all three states, so this was a control change, not a code change.
 - **No float `printf` in the firmware, ever** — one `%.1f` pulls 1-2 KB of the 64 KB flash for the float formatter. Scaled integers on the wire (×10 for deg/s and deg), divided once at parse time. This is why the health stream's gyro fields are integers.
 - **One `BLT_SendData()` per superloop pass.** The call restarts the TX DMA, so a second one before the first drains truncates the first — silently. This is why the health lines are short, why `T` is one ~106-byte line (it was three when it cycled mid/min/max) and why the health sender is gated on `!TLM_EVENT_PENDING()` so a queued `J`/`Z` always wins its slot. It is also why `health_mute_until` stands the stream off for 40 ms after `calibr_ir()` sends its `T` line.
 - **`HEALTH_ONLY`'s boot loop uses a `static volatile _Bool bench_leave`, not a bare `for(;;)`.** With a provably-infinite loop ARMCC emits `#128-D: loop is not reachable`, everything after the loop is eliminated, and flash silently drops from ~41.5 KB to 39492 B because the whole mission got thrown away — the warning was the only sign. A `#pragma` would hide the fact that the code after the loop is still wanted; a volatile the compiler cannot fold keeps it alive *and* keeps the zero-warning rule. Do not "simplify" this to `for(;;)`.

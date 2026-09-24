@@ -118,10 +118,11 @@ link open/close/errors. The 20 Hz `H`/`S` stream deliberately does not appear th
 is the line the pane exists for. The stream is drawn in the bar/panel above instead.
 **Ping robot** re-sends the probe; the app also sends it automatically on connect.
 
-With a `USE_TELEMETRY=1` build the view follows the data: `H`/`T` lines put the
+With a build that has both `USE_MAZE_TELEMETRY` and `USE_MAZE_HEALTH` set to `1`,
+the view follows the data: `H`/`T` lines put the
 app on the **health panel**, `S`/`J` lines put it back on the mission map, and a
 toolbar button overrides either way. The live health panel is documented in
-[Health check — `USE_HEALTH=1`](#health-check--use_health1) below, together with
+[Health check — the bench build](#health-check--the-bench-build) below, together with
 the bench procedure and the `H`/`T` field tables.
 
 **Dependency:** `pip install pyserial`, needed for the serial path **only** — the
@@ -167,13 +168,18 @@ Compiler 5, which is installed at `C:\Keil_v5\ARM\ARMCC\bin`. You do **not** nee
 to open the Keil IDE to check that it compiles, links, and fits:
 
 ```bash
-# The brain-driven firmware (what flashes today):
 bash scripts/build_firmware.sh
-
-# Supervised build: the same firmware plus telemetry AND a 5 s pause before
-# every junction move.  This is the bring-up build -- see below.
-USE_TELEMETRY=1 bash scripts/build_firmware.sh
 ```
+
+**This script takes no mode argument.** Which diagnostics are compiled in is set
+by three `0`/`1` switches at the top of `firmware/Core/Src/main.c`, in its
+`BUILD SWITCHES` block — `USE_MAZE_TELEMETRY`, `USE_MAZE_HEALTH`, `HEALTH_ONLY` —
+and that file is the *only* place they are set: no `-D` flag passes them, and the
+Keil project's `main.c` `Define:` box is now empty. Edit the switches, rebuild,
+and the banner echoes back what you actually built. The two combinations worth
+knowing are telemetry `1` + health `1` (the supervised bring-up build: mission
+stream plus a 5 s pause before every junction move) and health `1` +
+`HEALTH_ONLY 1` (the bench build — see [below](#health-check--the-bench-build)).
 
 There is no `USE_SOLVER` switch any more and no legacy fallback: the decision
 core *is* the decision maker, unconditionally. The legacy left-hand-rule
@@ -246,19 +252,26 @@ exist only on the physical robot:
 2. **which sensors actually fire** at a junction, which validates `SENSORS.md`
 3. **how long the branch detector stays live**, which is the decision's timing budget
 
-`USE_TELEMETRY=1` produces a build that measures all three — and it is also the
-**supervised build**: it arms a 5 s pause between printing a decision and making
-it. Press KEY1, and the robot stops at each junction for 5 s with the decision on
-the Bluetooth link, so a bad decision can be caught before the robot commits. The
-motors are explicitly stopped and the stop pushed to the servos before the pause,
-because the pause blocks the superloop that would otherwise re-issue the drive
-command.
+`USE_MAZE_TELEMETRY 1` produces a build that measures all three — and it is also
+the **supervised build**: it arms a 5 s pause between printing a decision and
+making it. Press KEY1, and the robot stops at each junction for 5 s with the
+decision on the Bluetooth link, so a bad decision can be caught before the robot
+commits. The motors are explicitly stopped and the stop pushed to the servos
+before the pause, because the pause blocks the superloop that would otherwise
+re-issue the drive command.
 
 It changes **what** the robot decides in no way at all — telemetry and the pause
-are both guarded by the macro.
+are both inside the guard for that switch.
+
+```c
+/* firmware/Core/Src/main.c, BUILD SWITCHES, then: */
+#define USE_MAZE_TELEMETRY  1
+#define USE_MAZE_HEALTH     1   /* the same flash then covers the bench too */
+#define HEALTH_ONLY         0   /* keep 0, or the robot cannot start */
+```
 
 ```bash
-USE_TELEMETRY=1 bash scripts/build_firmware.sh
+bash scripts/build_firmware.sh
 # flash build/firmware/seyed.hex, capture the Bluetooth output to capture.txt:
 python scripts/parse_telemetry.py capture.txt
 ```
@@ -320,34 +333,45 @@ there being a forward path.
 
 ---
 
-## Health check — `USE_HEALTH=1`
+## Health check — the bench build
 
 The **bench** instrument. M1 telemetry only streams while a mission is running
 (`loop_start != 0`), so a robot standing still — before KEY1, or parked after a
 run — is silent. That is exactly the state in which you want to look at the
-hardware, and it is the state the health build answers for:
+hardware, and it is the state the health build answers for. Set the switches at
+the top of `firmware/Core/Src/main.c`, then build:
 
-```bash
-USE_HEALTH=1 bash scripts/build_firmware.sh       # BENCH ONLY -- no mission
-USE_TELEMETRY=1 bash scripts/build_firmware.sh    # both -- the one to flash to run
+```
+USE_MAZE_TELEMETRY  0     #  1 1 = bench: no stream while driving
+USE_MAZE_HEALTH     1     #  both builds need this one
+HEALTH_ONLY         1     #  0   -- 1 = BENCH ONLY, no mission
 ```
 
-**The two differ by one macro.** `USE_HEALTH=1` also defines `HEALTH_ONLY`: the
+**The bench and bring-up builds differ by one switch.** `HEALTH_ONLY 1` means the
 pre-KEY1 boot loop never exits, so the robot **cannot** start a mission whatever
 is pressed. That is the bench build — sit the robot down in diagnostics and leave
-it there. `USE_TELEMETRY=1` adds the health stream *without* `HEALTH_ONLY`, because
-that is the bring-up build and it has to be able to drive.
+it there. Setting `HEALTH_ONLY` back to `0` keeps the health stream *without*
+locking the mission out, because that is the bring-up build and it has to be able
+to drive; that is exactly the telemetry row from the table above (health `1`,
+telemetry `1`, `HEALTH_ONLY 0`).
 
-`USE_TELEMETRY=1` implies the health stream as well, so a single flash covers both
-jobs. The two never contend for the link: the health send is gated on the robot
-being **stopped** (`loop_start == 0 || loop_start >= 7`) and on
-`TLM_EVENT_PENDING()` being false, so a queued junction line always wins its slot.
-`TLM_DRIVING()` is the one predicate that separates them.
+`HEALTH_ONLY 1` with `USE_MAZE_HEALTH 0` is refused at compile time: a bench build
+with its stream off could neither run nor say why.
 
-In Keil the defines go in **Options for Target → C/C++ → Define**, which already
-reads `USE_HAL_DRIVER,STM32G031xx`. Add `USE_MAZE_HEALTH,HEALTH_ONLY` for the bench
-build, or `USE_MAZE_TELEMETRY,USE_MAZE_HEALTH` to be able to run. (The **Asm** tab's
-`Define` box is a different, empty box — that one is not it.)
+Telemetry and health are independent switches, so setting both to `1` in one build
+means a single flash covers both jobs — that is the bring-up build. Nothing
+implies anything: an earlier revision had the script define health whenever
+telemetry was asked for, which is exactly the kind of hidden coupling the switches
+in `main.c` were introduced to remove. The two streams never contend for the link
+anyway: the health send is gated on the robot being **stopped** (`loop_start == 0
+|| loop_start >= 7`) and on `TLM_EVENT_PENDING()` being false, so a queued junction
+line always wins its slot. `TLM_DRIVING()` is the one predicate that separates them.
+
+In Keil there is nothing to add: `main.c`'s `Define:` box is empty on purpose, and
+so is the target's — the switches in the file are the whole story, which is what
+makes the IDE build and the script build the same firmware. (`USE_HAL_DRIVER` and
+`STM32G031xx` are still passed at target level, and the **Asm** tab's `Define` box
+is a different, empty box — that one is not it.)
 
 ```bash
 python scripts/bt_monitor.py                 # the health panel is automatic
@@ -408,16 +432,23 @@ there is nothing left for min/max to be compared against. One line also keeps
 well inside the `BLT_SendData()` DMA restart window (`Hardware.c:135`); `min`/`max`
 are still *accepted* by the parser for old captures, but no build sends them.
 
-| Build | Flash | RAM |
+| Build (switches in `main.c`) | Flash | RAM |
 |---|---|---|
-| plain | 40820 / 65536 | 6832 / 8192 (1360 free) |
-| `USE_HEALTH=1` (bench: `+HEALTH_ONLY`) | 41560 / 65536 | 6848 / 8192 (1344 free) |
-| `USE_TELEMETRY=1` (health included, can run) | 42264 / 65536 | 6912 / 8192 (1280 free) |
+| all `0` | 40080 / 65536 | 6832 / 8192 (1360 free) |
+| health `1` + `HEALTH_ONLY 1` (bench) | 41176 / 65536 | 6848 / 8192 (1344 free) |
+| telemetry `1` + health `1` (health included, can run) | 42124 / 65536 | 6912 / 8192 (1280 free) |
+
+Measured 2026-09-24 with `build_firmware.sh`, and re-measured against the
+pre-switch build of the same date to confirm the `0`/`1` rewrite changed no
+object code at all. The figures this table carried before that (40820 / 41560 /
+42264) were from an earlier revision and were stale by 384 B on the bench row —
+which is the hazard of a size with no mode written next to it, and the reason the
+build banner now prints the switches.
 
 ### The bench procedure
 
-1. Flash the **bench** build (`USE_HEALTH=1`, i.e. `USE_MAZE_HEALTH` +
-   `HEALTH_ONLY`), or the `USE_TELEMETRY=1` build if you also want to run. Power on
+1. Flash the **bench** build (health `1` + `HEALTH_ONLY 1`), or the bring-up build
+   (telemetry `1` + health `1`, `HEALTH_ONLY 0`) if you also want to run. Power on
    without pressing KEY1. The robot sits in the boot loop and streams `H`/`T`.
 2. Connect `bt_monitor.py`. Two things should happen together: the view switches to
    the health panel by itself, and **`Hi ,mmdi` appears in the TERMINAL** — the app
@@ -457,7 +488,7 @@ are still *accepted* by the parser for old captures, but no build sends them.
    any card scrolls the panel (CHECKS, the verdict, is at the bottom). The
    **THRESHOLDS** table has its own scrollbar: all 18 pads are in it, 10 rows at a
    time, and the wheel over it scrolls the table rather than the panel.
-9. Either stop here (bench build), or — if you flashed the `USE_TELEMETRY=1` build —
+9. Either stop here (bench build), or — if you flashed the bring-up build —
    press **KEY1**: the stream stops, the mission starts, and the tools switch back
    to the mission view on the first `S`/`J` line.
 
@@ -700,8 +731,8 @@ is the single command executor for both stages.
 | `python scripts/run_brain.py <file.json>` | Test the decision core against a simulated robot |
 | `.\scripts\build_all.ps1` | Rebuild + run all unit tests |
 | `bash scripts/build_firmware.sh` | Build + link the STM32 firmware → `seyed.hex` |
-| `USE_TELEMETRY=1 bash scripts/build_firmware.sh` | **The supervised bring-up build:** +telemetry, +health stream, +5 s pause per junction |
-| `USE_HEALTH=1 bash scripts/build_firmware.sh` | **Bench only:** health stream, `HEALTH_ONLY` — the robot cannot start a mission. KEY2 = IR cal, KEY3 = gyro cal, KEY1 = re-send the banner |
+| telemetry `1` + health `1`, `HEALTH_ONLY 0` in `main.c` | **The supervised bring-up build:** +telemetry, +health stream, +5 s pause per junction |
+| health `1` + `HEALTH_ONLY 1` in `main.c` | **Bench only:** health stream, no mission possible. KEY2 = IR cal, KEY3 = gyro cal, KEY1 = re-send the banner |
 | `python scripts/parse_telemetry.py capture.txt` | Turn a capture into measurements + brain decisions |
 | `python scripts/bt_monitor.py` | **LIVE capture + virtual-brain decision check (GUI)** |
 | `python scripts/bt_monitor.py --replay <cap> --headless` | Re-run a capture with no robot; exit 1 on mismatch |

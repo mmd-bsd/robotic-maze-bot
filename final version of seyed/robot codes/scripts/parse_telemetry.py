@@ -2,9 +2,9 @@
 """parse_telemetry.py -- turn an M1 telemetry capture into bench measurements.
 
 WHAT THIS IS FOR
-The M1 firmware build (`USE_TELEMETRY=1 bash scripts/build_firmware.sh`) streams
-three line types over the Bluetooth link at 115200 baud.  Capture that text to a
-file, then run this.  It answers the three questions the solver port is blocked
+The M1 firmware build -- set `USE_MAZE_TELEMETRY` to 1 in main.c's BUILD SWITCHES
+block, then `bash scripts/build_firmware.sh` -- streams three line types over the
+Bluetooth link at 115200 baud.  Capture that text to a file, then run this.  It answers the three questions the solver port is blocked
 on, none of which can be answered from a desk:
 
   1. ENCODER CALIBRATION -- how many counts is one 20 cm cell, really?  The
@@ -33,7 +33,7 @@ LINE FORMAT (see the block comment in firmware/Core/Src/main.c)
   <dist>  = the distance in cm handed to the brain for this link
   <node>  = the brain's node id for this junction (0..N-1, or 65535 = invalid)
 
-  THE H AND T LINES ARE A DIFFERENT BUILD (USE_MAZE_HEALTH, see main.c).
+  THE H AND T LINES ARE A DIFFERENT BUILD (set USE_MAZE_HEALTH to 1 in main.c).
   They stream whenever the robot is STANDING STILL -- before KEY1 and after a
   run -- which is the one state the S/J/Z stream above never covers, so the two
   sets never appear at once.  Where S/J/Z say what the firmware BELIEVED, H/T
@@ -673,7 +673,8 @@ class HealthModel:
         """
         if not self.h:
             return [("INFO", "no H lines in this capture -- not a health build "
-                             "(needs USE_MAZE_HEALTH; see BUILD_GUIDE.md)")]
+                             "(set USE_MAZE_HEALTH to 1 in main.c; "
+                             "see BUILD_GUIDE.md)")]
         fails, warns, infos = [], [], []
         rows = self.rows()
         mid_known = "mid" in self.thr
@@ -987,8 +988,8 @@ def health_report(by_kind, bad):
         print("  something, so read every number below as possibly stale.")
 
     print("""
-  WHAT THIS IS.  H/T lines exist only in a USE_MAZE_HEALTH build, and the
-  firmware only sends them while the robot is STANDING STILL -- before KEY1
+  WHAT THIS IS.  H/T lines exist only when USE_MAZE_HEALTH is 1 in main.c, and
+  the firmware only sends them while the robot is STANDING STILL -- before KEY1
   and after a run.  So this is a bench reading, not a mission record: there
   is no map, no node and no decision in it.  Thresholds from T were applied
   to EVERY H sample here (see build_health_model); the live app cannot do
@@ -1153,8 +1154,8 @@ def report(args):
         print("              -> a dropped/truncated record, or a build whose")
         print("                 field count differs.  Treat the run as suspect.")
     if not s_lines and not j_lines and not h_lines:
-        print("\n  Nothing recognisable.  Is this a USE_TELEMETRY or")
-        print("  USE_HEALTH capture?")
+        print("\n  Nothing recognisable.  Is this a capture from a build with")
+        print("  USE_MAZE_TELEMETRY or USE_MAZE_HEALTH set to 1 in main.c?")
         return 1
 
     # -------------------------------------------------------------- health

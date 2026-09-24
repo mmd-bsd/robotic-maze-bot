@@ -22,7 +22,12 @@
 #
 # Usage (from robot codes/):
 #   bash scripts/measure_solver_ram.sh
-#   USE_TELEMETRY=1 bash scripts/measure_solver_ram.sh
+#
+# The build switches (USE_MAZE_TELEMETRY / USE_MAZE_HEALTH / HEALTH_ONLY) live in
+# main.c's BUILD SWITCHES block and are read from there by the build below.  They
+# are echoed at the top of this report on purpose: they move the RAM figure by
+# ~80 B and the flash figure by ~2 KB, so a size with no mode attached cannot be
+# compared against an older measurement.
 #
 # Requires the same Keil ARMCC 5 toolchain as build_firmware.sh.
 
@@ -48,6 +53,8 @@ if ! bash "$HERE/build_firmware.sh" >"$OUT/measure.log" 2>&1; then
     exit 1
 fi
 grep -E '^ (FLASH|RAM) :' "$OUT/measure.log" | sed 's/^/    /'
+# Which switches produced those numbers -- see the usage note at the top.
+grep -m1 'Switches, from main.c' "$OUT/measure.log" | sed 's/^/    /'
 
 [ -f "$MAP" ] || { echo "ERROR: no link map at $MAP" >&2; exit 1; }
 
